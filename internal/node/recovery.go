@@ -13,9 +13,18 @@ import (
 // StartRecovery initiates recovery process when node restarts
 func (n *Node) StartRecovery() error {
 	n.mu.Lock()
+	lastExec := n.lastExecuted
+	n.mu.Unlock()
+
+	// Skip recovery if this is a fresh start (no transactions executed yet)
+	if lastExec == 0 {
+		log.Printf("Node %d: Fresh start (seq=0), skipping recovery", n.id)
+		return nil
+	}
+
+	n.mu.Lock()
 	n.isRecovering = true
 	n.recoverySeq = n.lastExecuted
-	lastExec := n.lastExecuted
 	n.mu.Unlock()
 
 	log.Printf("Node %d: 🔄 Starting recovery from seq %d", n.id, lastExec)
@@ -255,4 +264,105 @@ func (n *Node) executeTransactionUnsafe(seqNum int32, entry *types.LogEntry) pb.
 	n.lastExecuted = seqNum
 
 	return result
+}
+
+// triggerRecoveryForGaps triggers recovery when gaps are detected
+func (n *Node) triggerRecoveryForGaps() {
+	log.Printf("Node %d: 🔄 Triggering recovery for detected gaps", n.id)
+
+	// Check if we're already recovering to avoid multiple concurrent recoveries
+	n.mu.Lock()
+	if n.isRecovering {
+		n.mu.Unlock()
+		log.Printf("Node %d: Recovery already in progress, skipping", n.id)
+		return
+	}
+	n.isRecovering = true
+	n.mu.Unlock()
+
+	// Add a cooldown to prevent excessive recovery attempts
+	time.Sleep(1 * time.Second)
+
+	// Wait a bit to avoid race conditions
+	time.Sleep(200 * time.Millisecond)
+
+	// Check if we have a leader
+	n.mu.RLock()
+	leaderID := n.leaderID
+	peerCount := len(n.peerClients)
+	n.mu.RUnlock()
+
+	if peerCount == 0 {
+		log.Printf("Node %d: No peers connected for recovery", n.id)
+		n.mu.Lock()
+		n.isRecovering = false
+		n.mu.Unlock()
+		return
+	}
+
+	if leaderID <= 0 {
+		log.Printf("Node %d: No leader for recovery, starting election", n.id)
+		n.mu.Lock()
+		n.isRecovering = false
+		n.mu.Unlock()
+		go n.StartLeaderElection()
+		return
+	}
+
+	// Try to get missing sequences from the leader
+	if err := n.requestMissingData(leaderID); err != nil {
+		log.Printf("Node %d: Recovery from leader failed: %v, starting election", n.id, err)
+		n.mu.Lock()
+		n.isRecovering = false
+		n.mu.Unlock()
+		go n.StartLeaderElection()
+		return
+	}
+
+	log.Printf("Node %d: ✅ Recovery for gaps completed", n.id)
+}
+
+// requestMissingSequences requests specific missing sequences from peers
+func (n *Node) requestMissingSequences(missingSeqs []int32) int {
+	successCount := 0
+
+	n.mu.RLock()
+	peers := make(map[int32]pb.PaxosNodeClient)
+	for k, v := range n.peerClients {
+		peers[k] = v
+	}
+	n.mu.RUnlock()
+
+	for _, seq := range missingSeqs {
+		if n.requestSequenceFromPeers(seq, peers) {
+			successCount++
+		}
+	}
+
+	return successCount
+}
+
+// requestSequenceFromPeers tries to get a specific sequence from any peer
+func (n *Node) requestSequenceFromPeers(seq int32, peers map[int32]pb.PaxosNodeClient) bool {
+	for peerID, peerClient := range peers {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		statusResp, err := peerClient.GetStatus(ctx, &pb.StatusRequest{NodeId: peerID})
+		cancel()
+
+		if err != nil {
+			continue
+		}
+
+		// If peer has executed this sequence, we know it's committed
+		if statusResp.NextSequenceNumber > seq {
+			log.Printf("Node %d: Peer %d has seq %d (next=%d), requesting details",
+				n.id, peerID, seq, statusResp.NextSequenceNumber)
+
+			// In a full implementation, we'd have a GetCommittedEntry RPC
+			// For now, we mark that we need it and the NEW-VIEW will provide it
+			return true
+		}
+	}
+
+	return false
 }

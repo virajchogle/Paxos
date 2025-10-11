@@ -53,14 +53,7 @@ func main() {
 		log.Fatalf("Failed to read test file: %v", err)
 	}
 
-	// DEBUG: Print what we loaded
-	fmt.Printf("\n[DEBUG] Loaded %d test sets\n", len(testSets))
-	if len(testSets) > 0 {
-		fmt.Printf("[DEBUG] Set 1 has %d transactions:\n", len(testSets[0].Transactions))
-		for i, txn := range testSets[0].Transactions {
-			fmt.Printf("[DEBUG]   %d. %s -> %s: %d\n", i+1, txn.Sender, txn.Receiver, txn.Amount)
-		}
-	}
+	// Successfully loaded test sets
 
 	mgr := &ClientManager{
 		clients:       make(map[string]*Client),
@@ -110,6 +103,33 @@ func main() {
 	time.Sleep(1 * time.Second)
 
 	mgr.runInteractive()
+}
+
+// setNodeActive sets a node to active or inactive mode
+func (m *ClientManager) setNodeActive(nodeID int32, active bool) error {
+	client, exists := m.nodeClients[nodeID]
+	if !exists {
+		return fmt.Errorf("node %d not connected", nodeID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req := &pb.SetActiveRequest{
+		NodeId: nodeID,
+		Active: active,
+	}
+
+	resp, err := client.SetActive(ctx, req)
+	if err != nil {
+		return fmt.Errorf("RPC failed: %v", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("node rejected request")
+	}
+
+	return nil
 }
 
 func (m *ClientManager) runInteractive() {
@@ -173,11 +193,6 @@ func (m *ClientManager) processNextSet() {
 	set := m.testSets[m.currentSet]
 	m.currentSet++
 
-	fmt.Printf("\n[DEBUG] processNextSet: set.SetNumber=%d, len(set.Transactions)=%d\n", set.SetNumber, len(set.Transactions))
-	for i, txn := range set.Transactions {
-		fmt.Printf("[DEBUG]   Txn %d: %s -> %s: %d\n", i+1, txn.Sender, txn.Receiver, txn.Amount)
-	}
-
 	fmt.Printf("\n╔════════════════════════════════════════╗\n")
 	fmt.Printf("║  Processing Test Set %d               ║\n", set.SetNumber)
 	fmt.Printf("╚════════════════════════════════════════╝\n")
@@ -201,10 +216,26 @@ func (m *ClientManager) processNextSet() {
 		}
 	}
 
+	// Automatically set inactive nodes
 	if len(inactiveNodes) > 0 {
-		fmt.Printf("⚠️  Nodes %v should be INACTIVE\n", inactiveNodes)
-		fmt.Println("Kill these nodes now, then press ENTER to continue...")
-		bufio.NewReader(os.Stdin).ReadBytes('\n')
+		fmt.Printf("⚠️  Setting nodes %v to INACTIVE\n", inactiveNodes)
+		for _, nodeID := range inactiveNodes {
+			if err := m.setNodeActive(nodeID, false); err != nil {
+				fmt.Printf("    Warning: Failed to deactivate node %d: %v\n", nodeID, err)
+			}
+		}
+
+		// Give time for remaining nodes to detect leader failure and elect new leader
+		fmt.Printf("⏳ Waiting for new leader election...\n")
+		time.Sleep(3 * time.Second)
+	}
+
+	// Ensure active nodes are active (in case they were previously inactive)
+	fmt.Printf("✅ Ensuring nodes %v are ACTIVE\n", set.ActiveNodes)
+	for _, nodeID := range set.ActiveNodes {
+		if err := m.setNodeActive(nodeID, true); err != nil {
+			fmt.Printf("    Warning: Failed to activate node %d: %v\n", nodeID, err)
+		}
 	}
 
 	// Group transactions by client and preserve order
@@ -214,6 +245,7 @@ func (m *ClientManager) processNextSet() {
 	})
 	txnOrder := make([]utils.Transaction, 0, len(set.Transactions))
 
+	// Assign global order numbers to transactions
 	for i, txn := range set.Transactions {
 		clientTxns[txn.Sender] = append(clientTxns[txn.Sender], struct {
 			txn utils.Transaction
@@ -225,68 +257,23 @@ func (m *ClientManager) processNextSet() {
 	fmt.Printf("Processing %d transactions from %d clients in parallel...\n\n",
 		len(set.Transactions), len(clientTxns))
 
-	// Process each client's transactions in parallel
-	var wg sync.WaitGroup
-	resultCh := make(chan struct {
-		txn utils.Transaction
-		err error
-		idx int
-	}, len(set.Transactions))
-
-	for clientID, txns := range clientTxns {
-		wg.Add(1)
-		go func(cid string, transactions []struct {
-			txn utils.Transaction
-			idx int
-		}) {
-			defer wg.Done()
-
-			for i, item := range transactions {
-				err := m.sendTransactionWithRetry(item.txn.Sender, item.txn.Receiver, item.txn.Amount)
-				resultCh <- struct {
-					txn utils.Transaction
-					err error
-					idx int
-				}{txn: item.txn, err: err, idx: item.idx}
-
-				// Small delay between requests from same client (closed-loop)
-				if i < len(transactions)-1 {
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
-		}(clientID, txns)
-	}
-
-	// Close result channel when all goroutines finish
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	// Collect and display results
-	results := make(map[int]struct {
-		txn utils.Transaction
-		err error
-	})
-
-	for result := range resultCh {
-		results[result.idx] = struct {
-			txn utils.Transaction
-			err error
-		}{txn: result.txn, err: result.err}
-	}
-
-	// Display results in original order
+	// Submit transactions sequentially with moderate delay
+	// This ensures deterministic ordering while being reasonably fast
 	successCount := 0
 	for i, txn := range txnOrder {
-		result := results[i]
-		if result.err == nil {
+		err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
+		if err == nil {
 			fmt.Printf("✅ [%d/%d] %s → %s: %d units\n",
 				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
 			successCount++
 		} else {
 			fmt.Printf("❌ [%d/%d] %s → %s: %d units - FAILED: %v\n",
-				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount, result.err)
+				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount, err)
+		}
+
+		// Moderate delay - enough for consensus + recovery, not too slow
+		if i < len(txnOrder)-1 {
+			time.Sleep(300 * time.Millisecond)
 		}
 	}
 

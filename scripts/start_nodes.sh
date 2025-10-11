@@ -4,11 +4,25 @@ set -e
 echo "Starting all 5 nodes in separate windows..."
 mkdir -p logs
 
+# Determine which binary to use
+if [[ -f "bin/node.exe" ]]; then
+    NODE_BIN="./bin/node.exe"
+elif [[ -f "bin/node" ]]; then
+    NODE_BIN="./bin/node"
+else
+    echo "ERROR: No node binary found in bin/"
+    echo "Please run: ./scripts/build.sh"
+    exit 1
+fi
+
+echo "Using binary: $NODE_BIN"
+
 # Stop any existing nodes
 echo "Stopping any existing nodes..."
 if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
     # Windows - use taskkill
     taskkill //F //IM node.exe 2>/dev/null || true
+    taskkill //F //IM node 2>/dev/null || true
 else
     # Linux/Mac - use pkill
     pkill -f "bin/node" || true
@@ -33,16 +47,16 @@ for i in {1..5}; do
     # For Git Bash on Windows or WSL
     if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WSLENV" ]]; then
         # Windows environment - use mintty (Git Bash terminal)
-        mintty -t "Paxos Node $i" -h always /bin/bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && ./bin/node --id=$i --config=config/nodes.yaml; exec bash" &
+        mintty -t "Paxos Node $i" -h always /bin/bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
     else
         # Linux/Mac - use gnome-terminal or xterm
         if command -v gnome-terminal &> /dev/null; then
-            gnome-terminal -- bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && ./bin/node --id=$i --config=config/nodes.yaml; exec bash" &
+            gnome-terminal -- bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
         elif command -v xterm &> /dev/null; then
-            xterm -T "Paxos Node $i" -e bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && ./bin/node --id=$i --config=config/nodes.yaml; exec bash" &
+            xterm -T "Paxos Node $i" -e bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
         else
             echo "Warning: No terminal emulator found. Running in background..."
-            ./bin/node --id=$i --config=config/nodes.yaml > logs/node${i}.log 2>&1 &
+            $NODE_BIN --id=$i --config=config/nodes.yaml > logs/node${i}.log 2>&1 &
         fi
     fi
     

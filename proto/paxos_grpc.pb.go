@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v6.32.1
-// source: proto/paxos.proto
+// source: paxos.proto
 
 package proto
 
@@ -27,6 +27,7 @@ const (
 	PaxosNode_Checkpoint_FullMethodName        = "/paxos.PaxosNode/Checkpoint"
 	PaxosNode_GetCheckpoint_FullMethodName     = "/paxos.PaxosNode/GetCheckpoint"
 	PaxosNode_GetStatus_FullMethodName         = "/paxos.PaxosNode/GetStatus"
+	PaxosNode_SetActive_FullMethodName         = "/paxos.PaxosNode/SetActive"
 )
 
 // PaxosNodeClient is the client API for PaxosNode service.
@@ -47,6 +48,8 @@ type PaxosNodeClient interface {
 	GetCheckpoint(ctx context.Context, in *GetCheckpointRequest, opts ...grpc.CallOption) (*GetCheckpointReply, error)
 	// Status and CLI
 	GetStatus(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusReply, error)
+	// Node control
+	SetActive(ctx context.Context, in *SetActiveRequest, opts ...grpc.CallOption) (*SetActiveReply, error)
 }
 
 type paxosNodeClient struct {
@@ -137,6 +140,16 @@ func (c *paxosNodeClient) GetStatus(ctx context.Context, in *StatusRequest, opts
 	return out, nil
 }
 
+func (c *paxosNodeClient) SetActive(ctx context.Context, in *SetActiveRequest, opts ...grpc.CallOption) (*SetActiveReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetActiveReply)
+	err := c.cc.Invoke(ctx, PaxosNode_SetActive_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PaxosNodeServer is the server API for PaxosNode service.
 // All implementations must embed UnimplementedPaxosNodeServer
 // for forward compatibility.
@@ -155,6 +168,8 @@ type PaxosNodeServer interface {
 	GetCheckpoint(context.Context, *GetCheckpointRequest) (*GetCheckpointReply, error)
 	// Status and CLI
 	GetStatus(context.Context, *StatusRequest) (*StatusReply, error)
+	// Node control
+	SetActive(context.Context, *SetActiveRequest) (*SetActiveReply, error)
 	mustEmbedUnimplementedPaxosNodeServer()
 }
 
@@ -188,6 +203,9 @@ func (UnimplementedPaxosNodeServer) GetCheckpoint(context.Context, *GetCheckpoin
 }
 func (UnimplementedPaxosNodeServer) GetStatus(context.Context, *StatusRequest) (*StatusReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetStatus not implemented")
+}
+func (UnimplementedPaxosNodeServer) SetActive(context.Context, *SetActiveRequest) (*SetActiveReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetActive not implemented")
 }
 func (UnimplementedPaxosNodeServer) mustEmbedUnimplementedPaxosNodeServer() {}
 func (UnimplementedPaxosNodeServer) testEmbeddedByValue()                   {}
@@ -354,6 +372,24 @@ func _PaxosNode_GetStatus_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PaxosNode_SetActive_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetActiveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PaxosNodeServer).SetActive(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PaxosNode_SetActive_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PaxosNodeServer).SetActive(ctx, req.(*SetActiveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PaxosNode_ServiceDesc is the grpc.ServiceDesc for PaxosNode service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -393,7 +429,11 @@ var PaxosNode_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetStatus",
 			Handler:    _PaxosNode_GetStatus_Handler,
 		},
+		{
+			MethodName: "SetActive",
+			Handler:    _PaxosNode_SetActive_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/paxos.proto",
+	Metadata: "paxos.proto",
 }

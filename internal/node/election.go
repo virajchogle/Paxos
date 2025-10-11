@@ -19,7 +19,13 @@ func (n *Node) StartLeaderElection() {
 		return
 	}
 	// compute tentative ballot locally (don't mutate shared ballot yet)
-	tentativeNum := n.currentBallot.Number + 1
+	// IMPORTANT: New ballot must be higher than BOTH currentBallot AND promisedBallot
+	// Otherwise, we won't be able to self-promise if we've promised to a higher ballot
+	maxBallotNum := n.currentBallot.Number
+	if n.promisedBallot.Number > maxBallotNum {
+		maxBallotNum = n.promisedBallot.Number
+	}
+	tentativeNum := maxBallotNum + 1
 	tentative := types.NewBallot(tentativeNum, n.id)
 	n.lastPrepareTime = time.Now()
 	n.mu.Unlock()
@@ -46,12 +52,10 @@ func (n *Node) StartLeaderElection() {
 	// self-promise if allowed
 	promiseCount := 0
 	acceptLogs := make([][]*pb.AcceptedEntry, 0)
-	highestCheckpointSeq := int32(0) // Track highest checkpoint from promise quorum
 	if tentative.Compare(localPromised) > 0 {
 		// include our own accept log
 		n.mu.RLock()
 		selfLog := n.getAcceptLog()
-		highestCheckpointSeq = n.checkpointSeq
 		n.mu.RUnlock()
 		acceptLogs = append(acceptLogs, selfLog)
 		promiseCount++
@@ -96,11 +100,7 @@ collectLoop:
 			if pr.reply != nil && pr.reply.Success {
 				promiseCount++
 				acceptLogs = append(acceptLogs, pr.reply.AcceptLog)
-				// Track highest checkpoint sequence number
-				if pr.reply.CheckpointSeq > highestCheckpointSeq {
-					highestCheckpointSeq = pr.reply.CheckpointSeq
-				}
-				log.Printf("Node %d: ✓ PROMISE from node %d (checkpoint_seq=%d)", n.id, pr.reply.NodeId, pr.reply.CheckpointSeq)
+				log.Printf("Node %d: ✓ PROMISE from node %d", n.id, pr.reply.NodeId)
 			}
 			// early exit when quorum achieved
 			if n.hasQuorum(promiseCount) {
@@ -124,10 +124,10 @@ collectLoop:
 	n.currentBallot = tentative
 	n.mu.Unlock()
 
-	log.Printf("Node %d: 👑 Elected as LEADER with quorum %d/%d (highest_checkpoint=%d)", n.id, promiseCount, n.quorumSize(), highestCheckpointSeq)
+	log.Printf("Node %d: 👑 Elected as LEADER with quorum %d/%d", n.id, promiseCount, n.quorumSize())
 
 	// Build NEW-VIEW and broadcast
-	n.sendNewView(acceptLogs, tentative, highestCheckpointSeq)
+	n.sendNewView(acceptLogs, tentative)
 
 	// leader actions
 	n.resetLeaderTimer()
@@ -139,8 +139,15 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	reqBallot := types.BallotFromProto(req.Ballot)
 	log.Printf("Node %d: Received PREPARE %s from node %d", n.id, reqBallot.String(), req.NodeId)
 
-	// Quick check without lock first
+	// Check if node is active
 	n.mu.RLock()
+	if !n.isActive {
+		n.mu.RUnlock()
+		log.Printf("Node %d: Rejecting PREPARE - node is INACTIVE", n.id)
+		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
+	}
+
+	// Quick check without lock first
 	if reqBallot.Compare(n.promisedBallot) <= 0 {
 		n.mu.RUnlock()
 		log.Printf("Node %d: Rejecting PREPARE - already promised higher", n.id)
@@ -161,17 +168,17 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 		})
 	}
 	wasLeader := n.isLeader
-	checkpointSeq := n.checkpointSeq // Include checkpoint info in promise
 	n.mu.RUnlock()
 
 	// Now acquire write lock briefly
 	n.mu.Lock()
 	n.promisedBallot = reqBallot
 	n.isLeader = false
-	n.leaderID = req.NodeId
+	// DON'T set leaderID here - wait for NEW-VIEW to confirm the election succeeded
+	// Setting it here causes nodes to think someone is leader even if election fails
 	n.mu.Unlock()
 
-	log.Printf("Node %d: ✓ PROMISE to node %d (checkpoint_seq=%d)", n.id, req.NodeId, checkpointSeq)
+	log.Printf("Node %d: ✓ PROMISE to node %d", n.id, req.NodeId)
 
 	// Do expensive operations without any locks
 	if wasLeader {
@@ -180,11 +187,10 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	n.resetLeaderTimer()
 
 	return &pb.PromiseReply{
-		Success:       true,
-		Ballot:        req.Ballot,
-		AcceptLog:     entries,
-		NodeId:        n.id,
-		CheckpointSeq: checkpointSeq,
+		Success:   true,
+		Ballot:    req.Ballot,
+		AcceptLog: entries,
+		NodeId:    n.id,
 	}, nil
 }
 
@@ -240,7 +246,7 @@ func (n *Node) getAcceptLog() []*pb.AcceptedEntry {
 	return entries
 }
 
-func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballot, checkpointSeq int32) {
+func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballot) {
 	merged := n.mergeAcceptLogs(acceptLogs)
 	// determine max seq in merged
 	var maxSeq int32 = 0
@@ -250,13 +256,25 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 		}
 	}
 
-	acceptMsgs := make([]*pb.AcceptRequest, 0, maxSeq)
-	// Only include requests AFTER checkpoint (seq > checkpointSeq)
-	startSeq := checkpointSeq + 1
-	if startSeq < 1 {
-		startSeq = 1
+	// Also check our own log for any sequences we have that might be missing from others
+	n.mu.RLock()
+	ourMaxSeq := n.lastExecuted
+	for seq := range n.acceptLog {
+		if seq > ourMaxSeq {
+			ourMaxSeq = seq
+		}
+	}
+	n.mu.RUnlock()
+
+	// Use the maximum sequence number from all sources
+	if ourMaxSeq > maxSeq {
+		maxSeq = ourMaxSeq
 	}
 
+	acceptMsgs := make([]*pb.AcceptRequest, 0, maxSeq)
+	startSeq := int32(1)
+
+	// Fill in all sequences from startSeq to maxSeq, including gaps with NO-OPs
 	for seq := startSeq; seq <= maxSeq; seq++ {
 		if entry, ok := merged[seq]; ok {
 			acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
@@ -266,19 +284,33 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 				IsNoop:         entry.IsNoop,
 			})
 		} else {
-			acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
-				Ballot:         ballot.ToProto(),
-				SequenceNumber: seq,
-				Request:        nil,
-				IsNoop:         true,
-			})
+			// Check if we have this sequence in our own log
+			n.mu.RLock()
+			ourEntry, hasOurEntry := n.acceptLog[seq]
+			n.mu.RUnlock()
+
+			if hasOurEntry {
+				acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
+					Ballot:         ballot.ToProto(),
+					SequenceNumber: seq,
+					Request:        ourEntry.Request,
+					IsNoop:         ourEntry.IsNoOp,
+				})
+			} else {
+				// Fill gap with NO-OP
+				acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
+					Ballot:         ballot.ToProto(),
+					SequenceNumber: seq,
+					Request:        nil,
+					IsNoop:         true,
+				})
+			}
 		}
 	}
 
 	newView := &pb.NewViewRequest{
 		Ballot:         ballot.ToProto(),
 		AcceptMessages: acceptMsgs,
-		CheckpointSeq:  checkpointSeq,
 	}
 
 	n.mu.Lock()
@@ -286,7 +318,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 	n.nextSeqNum = maxSeq + 1
 	n.mu.Unlock()
 
-	log.Printf("Node %d: Sending NEW-VIEW with %d messages (checkpoint_seq=%d)", n.id, len(acceptMsgs), checkpointSeq)
+	log.Printf("Node %d: Sending NEW-VIEW with %d messages", n.id, len(acceptMsgs))
 
 	// broadcast new-view and wait for acknowledgments
 	n.mu.RLock()
@@ -349,6 +381,27 @@ DONE:
 		log.Printf("Node %d: ⚠️  NEW-VIEW did not achieve quorum (%d/%d)",
 			n.id, acceptedCount, n.quorumSize())
 	}
+
+	// CRITICAL: After NEW-VIEW, send COMMIT messages for all sequences
+	// This ensures accepted-but-not-committed sequences get committed
+	log.Printf("Node %d: Sending COMMIT messages for all NEW-VIEW sequences", n.id)
+	for _, acceptMsg := range newView.AcceptMessages {
+		commitReq := &pb.CommitRequest{
+			Ballot:         ballot.ToProto(),
+			SequenceNumber: acceptMsg.SequenceNumber,
+			Request:        acceptMsg.Request,
+			IsNoop:         acceptMsg.IsNoop,
+		}
+
+		// Send to all peers
+		for pid, cli := range peers {
+			go func(peerID int32, c pb.PaxosNodeClient, req *pb.CommitRequest) {
+				ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+				defer cancel()
+				_, _ = c.Commit(ctx, req)
+			}(pid, cli, commitReq)
+		}
+	}
 }
 
 func (n *Node) mergeAcceptLogs(logs [][]*pb.AcceptedEntry) map[int32]*pb.AcceptedEntry {
@@ -372,6 +425,16 @@ func (n *Node) mergeAcceptLogs(logs [][]*pb.AcceptedEntry) map[int32]*pb.Accepte
 
 func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewViewReply, error) {
 	log.Printf("Node %d: Received NEW-VIEW with %d messages", n.id, len(req.AcceptMessages))
+
+	// Check if node is active
+	n.mu.RLock()
+	active := n.isActive
+	n.mu.RUnlock()
+
+	if !active {
+		log.Printf("Node %d: Rejecting NEW-VIEW - node is INACTIVE", n.id)
+		return &pb.NewViewReply{Success: false, NodeId: n.id}, nil
+	}
 
 	ballot := types.BallotFromProto(req.Ballot)
 	leaderID := ballot.NodeID
@@ -450,16 +513,22 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 			maxSeq = a.SequenceNumber
 		}
 	}
-	// find gaps (for logging)
+
+	// find gaps (for logging and recovery)
 	missing := []int32{}
-	for seq := int32(1); seq <= maxSeq; seq++ {
+	lastExec := n.lastExecuted
+	for seq := lastExec + 1; seq <= maxSeq; seq++ {
 		if _, ok := n.acceptLog[seq]; !ok {
 			missing = append(missing, seq)
 		}
 	}
+
 	if len(missing) > 0 {
-		log.Printf("Node %d: Detected gaps in log: %v", n.id, missing)
+		log.Printf("Node %d: Detected gaps in log: %v (lastExec=%d, maxSeq=%d)", n.id, missing, lastExec, maxSeq)
 	}
+
+	// Clear recovery flag since we're getting NEW-VIEW
+	n.isRecovering = false
 	n.mu.Unlock()
 
 	// Stop heartbeat if we were leader but no longer are
@@ -477,5 +546,59 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 		n.Accept(context.Background(), a)
 	}
 
-	log.Printf("Node %d: NEW-VIEW processed, caught up to seq %d", n.id, maxSeq)
+	// After processing NEW-VIEW, commit and execute all sequences
+	// All sequences in NEW-VIEW are considered committed since they were part of the elected view
+	n.mu.RLock()
+	lastExecAfter := n.lastExecuted
+	n.mu.RUnlock()
+
+	// Commit and execute all sequences from NEW-VIEW
+	for seq := lastExecAfter + 1; seq <= maxSeq; seq++ {
+		// First, commit the sequence if we have it in acceptLog
+		n.mu.Lock()
+		if entry, ok := n.acceptLog[seq]; ok {
+			if entry.Status != "C" && entry.Status != "E" {
+				entry.Status = "C"
+				n.committedLog[seq] = entry
+			}
+		}
+		n.mu.Unlock()
+
+		// Now try to execute
+		n.mu.RLock()
+		comm, exists := n.committedLog[seq]
+		n.mu.RUnlock()
+		if exists {
+			n.executeTransaction(seq, comm)
+		} else {
+			// Missing this sequence even after NEW-VIEW - fill with NO-OP to prevent permanent gap
+			log.Printf("Node %d: ⚠️  Still missing seq %d after NEW-VIEW - filling with NO-OP", n.id, seq)
+			n.mu.Lock()
+			noopEntry := types.NewLogEntry(
+				ballot, // already a pointer from types.BallotFromProto
+				seq,
+				&pb.TransactionRequest{
+					ClientId:  "NO-OP",
+					Timestamp: time.Now().UnixNano(),
+					Transaction: &pb.Transaction{
+						Sender:   "NO-OP",
+						Receiver: "NO-OP",
+						Amount:   0,
+					},
+				},
+				true, // isNoOp
+			)
+			noopEntry.Status = "C"
+			n.acceptLog[seq] = noopEntry
+			n.committedLog[seq] = noopEntry
+			n.mu.Unlock()
+			n.executeTransaction(seq, noopEntry)
+		}
+	}
+
+	n.mu.RLock()
+	finalExec := n.lastExecuted
+	n.mu.RUnlock()
+
+	log.Printf("Node %d: NEW-VIEW processed, caught up from seq %d to %d", n.id, lastExecAfter, finalExec)
 }

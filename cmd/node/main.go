@@ -55,11 +55,14 @@ func main() {
 	}
 	defer logFile.Close()
 
-	// Use a syncWriter that flushes after every write
-	sw := &syncWriter{w: logFile, f: logFile}
+	// Use a syncWriter that flushes after every write - write to BOTH file and stdout
+	sw := &syncWriter{w: io.MultiWriter(logFile, os.Stdout), f: logFile}
 
-	// Redirect standard logger to file with immediate flushing
+	// Redirect standard logger to file AND stdout with immediate flushing
 	log.SetOutput(sw)
+
+	// Also redirect stderr to log file to capture panics
+	os.Stderr = logFile
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	cfg, err := config.LoadConfig(*configFile)

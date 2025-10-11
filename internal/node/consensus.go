@@ -47,10 +47,60 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 					return resp, nil
 				}
 				log.Printf("Node %d: Forward to leader %d failed: %v", n.id, leaderID, err)
+
+				// Forward failed - clear leader and start election
+				n.mu.Lock()
+				n.leaderID = 0 // Clear failed leader
+				n.mu.Unlock()
+
+				// Fall through to wait for election below
+				log.Printf("Node %d: Leader failed, will wait for new election", n.id)
 			}
 		}
-		// no leader known: try to start election and ask client to retry
+
+		// No leader known - start election and wait for it to complete
 		go n.StartLeaderElection()
+
+		// Wait up to 3 seconds for a leader to be elected
+		maxWait := 3000 * time.Millisecond
+		pollInterval := 100 * time.Millisecond
+		deadline := time.Now().Add(maxWait)
+
+		log.Printf("Node %d: No leader, waiting for election to complete...", n.id)
+
+		for time.Now().Before(deadline) {
+			time.Sleep(pollInterval)
+
+			n.mu.RLock()
+			currentLeaderID := n.leaderID
+			nowLeader := n.isLeader
+			n.mu.RUnlock()
+
+			if nowLeader {
+				// We became leader during the wait
+				log.Printf("Node %d: Became leader, processing transaction", n.id)
+				return n.processAsLeader(req)
+			} else if currentLeaderID > 0 && currentLeaderID != n.id {
+				// A leader was elected, forward to them
+				log.Printf("Node %d: Leader %d elected, forwarding transaction", n.id, currentLeaderID)
+				n.mu.RLock()
+				client, exists := n.peerClients[currentLeaderID]
+				n.mu.RUnlock()
+
+				if exists {
+					ctx3, cancel3 := context.WithTimeout(context.Background(), 3*time.Second)
+					defer cancel3()
+					resp2, err2 := client.SubmitTransaction(ctx3, req)
+					if err2 == nil {
+						return resp2, nil
+					}
+					log.Printf("Node %d: Forward to new leader %d failed: %v", n.id, currentLeaderID, err2)
+				}
+			}
+		}
+
+		// Timeout - no leader elected
+		log.Printf("Node %d: Election timeout, no leader available", n.id)
 		return nil, fmt.Errorf("no leader available yet")
 	}
 
@@ -143,9 +193,10 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 QUORUM:
 
 	if !n.hasQuorum(acceptedCount) {
-		log.Printf("Node %d: No quorum for seq %d (%d/%d)", n.id, seq, acceptedCount, n.quorumSize())
-		// optionally cleanup acceptLog[seq] or mark failed
-		return nil, fmt.Errorf("no quorum for seq %d", seq)
+		log.Printf("Node %d: No quorum for seq %d (%d/%d) - keeping in acceptLog for later NEW-VIEW", n.id, seq, acceptedCount, n.quorumSize())
+		// DON'T cleanup acceptLog[seq] - keep it for NEW-VIEW recovery
+		// When more nodes come back, this will be included in NEW-VIEW and can achieve quorum then
+		return nil, fmt.Errorf("no quorum for seq %d (have %d, need %d)", seq, acceptedCount, n.quorumSize())
 	}
 
 	log.Printf("Node %d: Quorum achieved for seq %d (accepted=%d)", n.id, seq, acceptedCount)
@@ -189,6 +240,15 @@ QUORUM:
 // Accept handler (Phase 2a)
 func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedReply, error) {
 	n.mu.Lock()
+
+	// Check if node is active
+	if !n.isActive {
+		n.mu.Unlock()
+		if req.SequenceNumber > 0 {
+			log.Printf("Node %d: Rejecting ACCEPT - node is INACTIVE", n.id)
+		}
+		return &pb.AcceptedReply{Success: false, Ballot: req.Ballot, SequenceNumber: req.SequenceNumber, NodeId: n.id}, nil
+	}
 
 	reqBallot := types.BallotFromProto(req.Ballot)
 
@@ -241,6 +301,18 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 
 // Commit handles commit requests (Phase 2b)
 func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitReply, error) {
+	// Check if node is active
+	n.mu.RLock()
+	active := n.isActive
+	n.mu.RUnlock()
+
+	if !active {
+		if req.SequenceNumber > 0 {
+			log.Printf("Node %d: Rejecting COMMIT - node is INACTIVE", n.id)
+		}
+		return &pb.CommitReply{Success: false}, nil
+	}
+
 	// Only log non-heartbeat COMMIT messages (seq > 0)
 	if !req.IsNoop && req.SequenceNumber > 0 {
 		log.Printf("Node %d: Received COMMIT seq=%d", n.id, req.SequenceNumber)
@@ -249,19 +321,7 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 	n.commitAndExecute(req.SequenceNumber)
 
 	// Check if leader should create checkpoint
-	n.mu.Lock()
-	if n.isLeader {
-		n.commitsSinceCP++
-		if n.commitsSinceCP >= n.checkpointPeriod {
-			seq := req.SequenceNumber
-			n.mu.Unlock()
-			go n.createCheckpoint(seq)
-		} else {
-			n.mu.Unlock()
-		}
-	} else {
-		n.mu.Unlock()
-	}
+	// Checkpointing removed for consensus correctness
 
 	return &pb.CommitReply{Success: true}, nil
 }
@@ -272,8 +332,16 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	// ensure entry exists
 	entry, ok := n.acceptLog[seq]
 	if !ok {
+		// We received a COMMIT for a sequence we don't have in our acceptLog
+		// This means we missed the ACCEPT message (possibly while inactive)
+		lastExec := n.lastExecuted
 		n.mu.Unlock()
-		log.Printf("Node %d: No entry to commit for seq %d", n.id, seq)
+
+		if seq > lastExec+1 {
+			log.Printf("Node %d: Missing acceptLog entry for seq %d (lastExecuted=%d) - will be filled by NEW-VIEW", n.id, seq, lastExec)
+			// Don't trigger recovery here to avoid infinite loops
+			// The NEW-VIEW protocol will handle this
+		}
 		return pb.ResultType_FAILED
 	}
 	// mark committed
@@ -281,18 +349,31 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	n.committedLog[seq] = entry
 	n.mu.Unlock()
 
-	// execute all committed entries up to seq
+	// execute all committed entries sequentially from lastExecuted+1
 	var finalResult pb.ResultType = pb.ResultType_SUCCESS
-	for s := n.lastExecuted + 1; s <= seq; s++ {
+	n.mu.RLock()
+	lastExec := n.lastExecuted
+	n.mu.RUnlock()
+
+	for {
+		nextSeq := lastExec + 1
 		n.mu.RLock()
-		comm, exists := n.committedLog[s]
+		comm, exists := n.committedLog[nextSeq]
 		n.mu.RUnlock()
+
 		if !exists {
-			// can't execute beyond a gap
+			// No more consecutive committed sequences
+			if nextSeq <= seq {
+				log.Printf("Node %d: Gap at seq %d prevents execution (trying to reach seq %d) - waiting for NEW-VIEW", n.id, nextSeq, seq)
+			}
 			break
 		}
-		res := n.executeTransaction(s, comm)
-		finalResult = res
+
+		res := n.executeTransaction(nextSeq, comm)
+		if nextSeq == seq {
+			finalResult = res
+		}
+		lastExec = nextSeq
 	}
 	return finalResult
 }
@@ -340,12 +421,12 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	log.Printf("Node %d: ✅ EXECUTED seq=%d: %s->%s:%d (new: %s=%d, %s=%d)",
 		n.id, seq, sender, recv, amt, sender, n.balances[sender], recv, n.balances[recv])
 
-	// Save database state to disk
-	n.mu.RUnlock()
+	// Save database state to disk (must release lock first to avoid holding it during I/O)
+	n.mu.Unlock()
 	if err := n.saveDatabase(); err != nil {
 		log.Printf("Node %d: ⚠️  Warning - failed to save database: %v", n.id, err)
 	}
-	n.mu.RLock()
+	n.mu.Lock()
 
 	return pb.ResultType_SUCCESS
 }
@@ -477,4 +558,89 @@ func (n *Node) ShowStatus() {
 	fmt.Printf("  NEW-VIEW Count: %d\n", len(n.newViewLog))
 	fmt.Printf("  Active: %v\n", n.isActive)
 	fmt.Println()
+}
+
+// SetActive allows external control to activate/deactivate a node
+// This is kept simple to avoid any potential deadlocks
+func (n *Node) SetActive(ctx context.Context, req *pb.SetActiveRequest) (*pb.SetActiveReply, error) {
+	// DIAGNOSTIC: Log immediately when RPC is received
+	log.Printf("Node %d: ⚙️  SetActive RPC RECEIVED: req.Active=%v", n.id, req.Active)
+
+	n.mu.Lock()
+	wasActive := n.isActive
+	n.isActive = req.Active
+	wasLeader := n.isLeader
+	currentLeaderID := n.leaderID
+
+	log.Printf("Node %d: ⚙️  SetActive PROCESSING: wasActive=%v, nowActive=%v, wasLeader=%v, leaderID=%d",
+		n.id, wasActive, n.isActive, wasLeader, currentLeaderID)
+
+	// If becoming inactive and was leader, step down
+	if !req.Active && wasLeader {
+		n.isLeader = false
+		n.leaderID = 0 // No known leader
+		log.Printf("Node %d: ⚙️  Was leader, stepping down and clearing leaderID", n.id)
+	}
+
+	currentActive := n.isActive
+	n.mu.Unlock()
+
+	if req.Active {
+		// Node is now active (either newly activated or already was active)
+		if wasActive {
+			log.Printf("Node %d: ✅ Node already ACTIVE (leader=%d)", n.id, currentLeaderID)
+		} else {
+			log.Printf("Node %d: ✅ Node set to ACTIVE (was inactive)", n.id)
+
+			// Check if we have gaps in our log by looking for missing sequences
+			n.mu.RLock()
+			lastExec := n.lastExecuted
+			maxSeq := lastExec
+			for seq := range n.acceptLog {
+				if seq > maxSeq {
+					maxSeq = seq
+				}
+			}
+			n.mu.RUnlock()
+
+			// If we have gaps, trigger election to get NEW-VIEW with missing data
+			if maxSeq > lastExec+1 {
+				log.Printf("Node %d: Detected gaps in log after reactivation (lastExec=%d, maxSeq=%d) - triggering election for recovery",
+					n.id, lastExec, maxSeq)
+				// Brief delay to avoid race with concurrent NEW-VIEWs
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					n.StartLeaderElection()
+				}()
+			}
+		}
+
+		// Check if we need a leader election
+		// Trigger election if:
+		// 1. We're not the leader ourselves
+		// 2. AND (no known leader OR leader might be inactive)
+		if !wasLeader && currentLeaderID <= 0 {
+			log.Printf("Node %d: No known leader - starting election", n.id)
+			go n.StartLeaderElection()
+		} else if !wasLeader && currentLeaderID > 0 {
+			// We think there's a leader - check if it's actually reachable
+			// by waiting for heartbeat timeout if needed (passive detection)
+			log.Printf("Node %d: Believes leader is %d", n.id, currentLeaderID)
+		}
+	} else {
+		log.Printf("Node %d: ⏸️  Node set to INACTIVE (simulating failure)", n.id)
+
+		// Stop heartbeat if was leader
+		if wasLeader {
+			n.stopHeartbeat()
+		}
+	}
+
+	log.Printf("Node %d: ⚙️  SetActive RPC COMPLETED: returning Active=%v", n.id, currentActive)
+
+	return &pb.SetActiveReply{
+		Success: true,
+		NodeId:  n.id,
+		Active:  currentActive,
+	}, nil
 }

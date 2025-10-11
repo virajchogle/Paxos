@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.9
 // 	protoc        v6.32.1
-// source: proto/paxos.proto
+// source: paxos.proto
 
 package proto
 
@@ -55,11 +55,11 @@ func (x ResultType) String() string {
 }
 
 func (ResultType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_paxos_proto_enumTypes[0].Descriptor()
+	return file_paxos_proto_enumTypes[0].Descriptor()
 }
 
 func (ResultType) Type() protoreflect.EnumType {
-	return &file_proto_paxos_proto_enumTypes[0]
+	return &file_paxos_proto_enumTypes[0]
 }
 
 func (x ResultType) Number() protoreflect.EnumNumber {
@@ -68,7 +68,7 @@ func (x ResultType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ResultType.Descriptor instead.
 func (ResultType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{0}
+	return file_paxos_proto_rawDescGZIP(), []int{0}
 }
 
 // Ballot number
@@ -82,7 +82,7 @@ type Ballot struct {
 
 func (x *Ballot) Reset() {
 	*x = Ballot{}
-	mi := &file_proto_paxos_proto_msgTypes[0]
+	mi := &file_paxos_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -94,7 +94,7 @@ func (x *Ballot) String() string {
 func (*Ballot) ProtoMessage() {}
 
 func (x *Ballot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[0]
+	mi := &file_paxos_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -107,7 +107,7 @@ func (x *Ballot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ballot.ProtoReflect.Descriptor instead.
 func (*Ballot) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{0}
+	return file_paxos_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Ballot) GetNumber() int32 {
@@ -136,7 +136,7 @@ type Transaction struct {
 
 func (x *Transaction) Reset() {
 	*x = Transaction{}
-	mi := &file_proto_paxos_proto_msgTypes[1]
+	mi := &file_paxos_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -148,7 +148,7 @@ func (x *Transaction) String() string {
 func (*Transaction) ProtoMessage() {}
 
 func (x *Transaction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[1]
+	mi := &file_paxos_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -161,7 +161,7 @@ func (x *Transaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Transaction.ProtoReflect.Descriptor instead.
 func (*Transaction) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{1}
+	return file_paxos_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Transaction) GetSender() string {
@@ -197,7 +197,7 @@ type TransactionRequest struct {
 
 func (x *TransactionRequest) Reset() {
 	*x = TransactionRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[2]
+	mi := &file_paxos_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -209,7 +209,7 @@ func (x *TransactionRequest) String() string {
 func (*TransactionRequest) ProtoMessage() {}
 
 func (x *TransactionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[2]
+	mi := &file_paxos_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -222,7 +222,7 @@ func (x *TransactionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransactionRequest.ProtoReflect.Descriptor instead.
 func (*TransactionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{2}
+	return file_paxos_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *TransactionRequest) GetClientId() string {
@@ -259,7 +259,7 @@ type TransactionReply struct {
 
 func (x *TransactionReply) Reset() {
 	*x = TransactionReply{}
-	mi := &file_proto_paxos_proto_msgTypes[3]
+	mi := &file_paxos_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -271,7 +271,7 @@ func (x *TransactionReply) String() string {
 func (*TransactionReply) ProtoMessage() {}
 
 func (x *TransactionReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[3]
+	mi := &file_paxos_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -284,7 +284,7 @@ func (x *TransactionReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransactionReply.ProtoReflect.Descriptor instead.
 func (*TransactionReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{3}
+	return file_paxos_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *TransactionReply) GetSuccess() bool {
@@ -326,7 +326,7 @@ type PrepareRequest struct {
 
 func (x *PrepareRequest) Reset() {
 	*x = PrepareRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[4]
+	mi := &file_paxos_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -338,7 +338,7 @@ func (x *PrepareRequest) String() string {
 func (*PrepareRequest) ProtoMessage() {}
 
 func (x *PrepareRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[4]
+	mi := &file_paxos_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -351,7 +351,7 @@ func (x *PrepareRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareRequest.ProtoReflect.Descriptor instead.
 func (*PrepareRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{4}
+	return file_paxos_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PrepareRequest) GetBallot() *Ballot {
@@ -380,7 +380,7 @@ type AcceptedEntry struct {
 
 func (x *AcceptedEntry) Reset() {
 	*x = AcceptedEntry{}
-	mi := &file_proto_paxos_proto_msgTypes[5]
+	mi := &file_paxos_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -392,7 +392,7 @@ func (x *AcceptedEntry) String() string {
 func (*AcceptedEntry) ProtoMessage() {}
 
 func (x *AcceptedEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[5]
+	mi := &file_paxos_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -405,7 +405,7 @@ func (x *AcceptedEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptedEntry.ProtoReflect.Descriptor instead.
 func (*AcceptedEntry) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{5}
+	return file_paxos_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *AcceptedEntry) GetBallot() *Ballot {
@@ -449,7 +449,7 @@ type PromiseReply struct {
 
 func (x *PromiseReply) Reset() {
 	*x = PromiseReply{}
-	mi := &file_proto_paxos_proto_msgTypes[6]
+	mi := &file_paxos_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -461,7 +461,7 @@ func (x *PromiseReply) String() string {
 func (*PromiseReply) ProtoMessage() {}
 
 func (x *PromiseReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[6]
+	mi := &file_paxos_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -474,7 +474,7 @@ func (x *PromiseReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromiseReply.ProtoReflect.Descriptor instead.
 func (*PromiseReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{6}
+	return file_paxos_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PromiseReply) GetSuccess() bool {
@@ -525,7 +525,7 @@ type AcceptRequest struct {
 
 func (x *AcceptRequest) Reset() {
 	*x = AcceptRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[7]
+	mi := &file_paxos_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -537,7 +537,7 @@ func (x *AcceptRequest) String() string {
 func (*AcceptRequest) ProtoMessage() {}
 
 func (x *AcceptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[7]
+	mi := &file_paxos_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -550,7 +550,7 @@ func (x *AcceptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptRequest.ProtoReflect.Descriptor instead.
 func (*AcceptRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{7}
+	return file_paxos_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *AcceptRequest) GetBallot() *Ballot {
@@ -593,7 +593,7 @@ type AcceptedReply struct {
 
 func (x *AcceptedReply) Reset() {
 	*x = AcceptedReply{}
-	mi := &file_proto_paxos_proto_msgTypes[8]
+	mi := &file_paxos_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -605,7 +605,7 @@ func (x *AcceptedReply) String() string {
 func (*AcceptedReply) ProtoMessage() {}
 
 func (x *AcceptedReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[8]
+	mi := &file_paxos_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -618,7 +618,7 @@ func (x *AcceptedReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptedReply.ProtoReflect.Descriptor instead.
 func (*AcceptedReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{8}
+	return file_paxos_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *AcceptedReply) GetSuccess() bool {
@@ -662,7 +662,7 @@ type CommitRequest struct {
 
 func (x *CommitRequest) Reset() {
 	*x = CommitRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[9]
+	mi := &file_paxos_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -674,7 +674,7 @@ func (x *CommitRequest) String() string {
 func (*CommitRequest) ProtoMessage() {}
 
 func (x *CommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[9]
+	mi := &file_paxos_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -687,7 +687,7 @@ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
 func (*CommitRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{9}
+	return file_paxos_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CommitRequest) GetBallot() *Ballot {
@@ -727,7 +727,7 @@ type CommitReply struct {
 
 func (x *CommitReply) Reset() {
 	*x = CommitReply{}
-	mi := &file_proto_paxos_proto_msgTypes[10]
+	mi := &file_paxos_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -739,7 +739,7 @@ func (x *CommitReply) String() string {
 func (*CommitReply) ProtoMessage() {}
 
 func (x *CommitReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[10]
+	mi := &file_paxos_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -752,7 +752,7 @@ func (x *CommitReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitReply.ProtoReflect.Descriptor instead.
 func (*CommitReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{10}
+	return file_paxos_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CommitReply) GetSuccess() bool {
@@ -774,7 +774,7 @@ type NewViewRequest struct {
 
 func (x *NewViewRequest) Reset() {
 	*x = NewViewRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[11]
+	mi := &file_paxos_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -786,7 +786,7 @@ func (x *NewViewRequest) String() string {
 func (*NewViewRequest) ProtoMessage() {}
 
 func (x *NewViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[11]
+	mi := &file_paxos_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -799,7 +799,7 @@ func (x *NewViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewViewRequest.ProtoReflect.Descriptor instead.
 func (*NewViewRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{11}
+	return file_paxos_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *NewViewRequest) GetBallot() *Ballot {
@@ -833,7 +833,7 @@ type NewViewReply struct {
 
 func (x *NewViewReply) Reset() {
 	*x = NewViewReply{}
-	mi := &file_proto_paxos_proto_msgTypes[12]
+	mi := &file_paxos_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -845,7 +845,7 @@ func (x *NewViewReply) String() string {
 func (*NewViewReply) ProtoMessage() {}
 
 func (x *NewViewReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[12]
+	mi := &file_paxos_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -858,7 +858,7 @@ func (x *NewViewReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewViewReply.ProtoReflect.Descriptor instead.
 func (*NewViewReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{12}
+	return file_paxos_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *NewViewReply) GetSuccess() bool {
@@ -887,7 +887,7 @@ type CheckpointRequest struct {
 
 func (x *CheckpointRequest) Reset() {
 	*x = CheckpointRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[13]
+	mi := &file_paxos_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -899,7 +899,7 @@ func (x *CheckpointRequest) String() string {
 func (*CheckpointRequest) ProtoMessage() {}
 
 func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[13]
+	mi := &file_paxos_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -912,7 +912,7 @@ func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointRequest.ProtoReflect.Descriptor instead.
 func (*CheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{13}
+	return file_paxos_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CheckpointRequest) GetSequenceNumber() int32 {
@@ -946,7 +946,7 @@ type CheckpointReply struct {
 
 func (x *CheckpointReply) Reset() {
 	*x = CheckpointReply{}
-	mi := &file_proto_paxos_proto_msgTypes[14]
+	mi := &file_paxos_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -958,7 +958,7 @@ func (x *CheckpointReply) String() string {
 func (*CheckpointReply) ProtoMessage() {}
 
 func (x *CheckpointReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[14]
+	mi := &file_paxos_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -971,7 +971,7 @@ func (x *CheckpointReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointReply.ProtoReflect.Descriptor instead.
 func (*CheckpointReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{14}
+	return file_paxos_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CheckpointReply) GetSuccess() bool {
@@ -997,7 +997,7 @@ type GetCheckpointRequest struct {
 
 func (x *GetCheckpointRequest) Reset() {
 	*x = GetCheckpointRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[15]
+	mi := &file_paxos_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1009,7 +1009,7 @@ func (x *GetCheckpointRequest) String() string {
 func (*GetCheckpointRequest) ProtoMessage() {}
 
 func (x *GetCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[15]
+	mi := &file_paxos_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1022,7 +1022,7 @@ func (x *GetCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*GetCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{15}
+	return file_paxos_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetCheckpointRequest) GetNodeId() int32 {
@@ -1043,7 +1043,7 @@ type GetCheckpointReply struct {
 
 func (x *GetCheckpointReply) Reset() {
 	*x = GetCheckpointReply{}
-	mi := &file_proto_paxos_proto_msgTypes[16]
+	mi := &file_paxos_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1055,7 +1055,7 @@ func (x *GetCheckpointReply) String() string {
 func (*GetCheckpointReply) ProtoMessage() {}
 
 func (x *GetCheckpointReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[16]
+	mi := &file_paxos_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1068,7 +1068,7 @@ func (x *GetCheckpointReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCheckpointReply.ProtoReflect.Descriptor instead.
 func (*GetCheckpointReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{16}
+	return file_paxos_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetCheckpointReply) GetSuccess() bool {
@@ -1102,7 +1102,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[17]
+	mi := &file_paxos_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1114,7 +1114,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[17]
+	mi := &file_paxos_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1127,7 +1127,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{17}
+	return file_paxos_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StatusRequest) GetNodeId() int32 {
@@ -1151,7 +1151,7 @@ type StatusReply struct {
 
 func (x *StatusReply) Reset() {
 	*x = StatusReply{}
-	mi := &file_proto_paxos_proto_msgTypes[18]
+	mi := &file_paxos_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1163,7 +1163,7 @@ func (x *StatusReply) String() string {
 func (*StatusReply) ProtoMessage() {}
 
 func (x *StatusReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[18]
+	mi := &file_paxos_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1176,7 +1176,7 @@ func (x *StatusReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusReply.ProtoReflect.Descriptor instead.
 func (*StatusReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{18}
+	return file_paxos_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StatusReply) GetNodeId() int32 {
@@ -1221,11 +1221,124 @@ func (x *StatusReply) GetTransactionsReceived() int32 {
 	return 0
 }
 
-var File_proto_paxos_proto protoreflect.FileDescriptor
+// Node control
+type SetActiveRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        int32                  `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Active        bool                   `protobuf:"varint,2,opt,name=active,proto3" json:"active,omitempty"` // true = active, false = inactive
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
 
-const file_proto_paxos_proto_rawDesc = "" +
+func (x *SetActiveRequest) Reset() {
+	*x = SetActiveRequest{}
+	mi := &file_paxos_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetActiveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetActiveRequest) ProtoMessage() {}
+
+func (x *SetActiveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_paxos_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetActiveRequest.ProtoReflect.Descriptor instead.
+func (*SetActiveRequest) Descriptor() ([]byte, []int) {
+	return file_paxos_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SetActiveRequest) GetNodeId() int32 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *SetActiveRequest) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+type SetActiveReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	NodeId        int32                  `protobuf:"varint,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Active        bool                   `protobuf:"varint,3,opt,name=active,proto3" json:"active,omitempty"` // Current active status
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetActiveReply) Reset() {
+	*x = SetActiveReply{}
+	mi := &file_paxos_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetActiveReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetActiveReply) ProtoMessage() {}
+
+func (x *SetActiveReply) ProtoReflect() protoreflect.Message {
+	mi := &file_paxos_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetActiveReply.ProtoReflect.Descriptor instead.
+func (*SetActiveReply) Descriptor() ([]byte, []int) {
+	return file_paxos_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SetActiveReply) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SetActiveReply) GetNodeId() int32 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *SetActiveReply) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+var File_paxos_proto protoreflect.FileDescriptor
+
+const file_paxos_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/paxos.proto\x12\x05paxos\"9\n" +
+	"\vpaxos.proto\x12\x05paxos\"9\n" +
 	"\x06Ballot\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\x05R\x06number\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\x05R\x06nodeId\"Y\n" +
@@ -1310,13 +1423,20 @@ const file_proto_paxos_proto_rawDesc = "" +
 	"\x15current_ballot_number\x18\x03 \x01(\x05R\x13currentBallotNumber\x12*\n" +
 	"\x11current_leader_id\x18\x04 \x01(\x05R\x0fcurrentLeaderId\x120\n" +
 	"\x14next_sequence_number\x18\x05 \x01(\x05R\x12nextSequenceNumber\x123\n" +
-	"\x15transactions_received\x18\x06 \x01(\x05R\x14transactionsReceived*?\n" +
+	"\x15transactions_received\x18\x06 \x01(\x05R\x14transactionsReceived\"C\n" +
+	"\x10SetActiveRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\x05R\x06nodeId\x12\x16\n" +
+	"\x06active\x18\x02 \x01(\bR\x06active\"[\n" +
+	"\x0eSetActiveReply\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\x05R\x06nodeId\x12\x16\n" +
+	"\x06active\x18\x03 \x01(\bR\x06active*?\n" +
 	"\n" +
 	"ResultType\x12\v\n" +
 	"\aSUCCESS\x10\x00\x12\n" +
 	"\n" +
 	"\x06FAILED\x10\x01\x12\x18\n" +
-	"\x14INSUFFICIENT_BALANCE\x10\x022\xec\x03\n" +
+	"\x14INSUFFICIENT_BALANCE\x10\x022\xa9\x04\n" +
 	"\tPaxosNode\x12G\n" +
 	"\x11SubmitTransaction\x12\x19.paxos.TransactionRequest\x1a\x17.paxos.TransactionReply\x125\n" +
 	"\aPrepare\x12\x15.paxos.PrepareRequest\x1a\x13.paxos.PromiseReply\x124\n" +
@@ -1326,23 +1446,24 @@ const file_proto_paxos_proto_rawDesc = "" +
 	"\n" +
 	"Checkpoint\x12\x18.paxos.CheckpointRequest\x1a\x16.paxos.CheckpointReply\x12G\n" +
 	"\rGetCheckpoint\x12\x1b.paxos.GetCheckpointRequest\x1a\x19.paxos.GetCheckpointReply\x125\n" +
-	"\tGetStatus\x12\x14.paxos.StatusRequest\x1a\x12.paxos.StatusReplyB\tZ\a./protob\x06proto3"
+	"\tGetStatus\x12\x14.paxos.StatusRequest\x1a\x12.paxos.StatusReply\x12;\n" +
+	"\tSetActive\x12\x17.paxos.SetActiveRequest\x1a\x15.paxos.SetActiveReplyB\tZ\a./protob\x06proto3"
 
 var (
-	file_proto_paxos_proto_rawDescOnce sync.Once
-	file_proto_paxos_proto_rawDescData []byte
+	file_paxos_proto_rawDescOnce sync.Once
+	file_paxos_proto_rawDescData []byte
 )
 
-func file_proto_paxos_proto_rawDescGZIP() []byte {
-	file_proto_paxos_proto_rawDescOnce.Do(func() {
-		file_proto_paxos_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_paxos_proto_rawDesc), len(file_proto_paxos_proto_rawDesc)))
+func file_paxos_proto_rawDescGZIP() []byte {
+	file_paxos_proto_rawDescOnce.Do(func() {
+		file_paxos_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_paxos_proto_rawDesc), len(file_paxos_proto_rawDesc)))
 	})
-	return file_proto_paxos_proto_rawDescData
+	return file_paxos_proto_rawDescData
 }
 
-var file_proto_paxos_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_paxos_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
-var file_proto_paxos_proto_goTypes = []any{
+var file_paxos_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_paxos_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_paxos_proto_goTypes = []any{
 	(ResultType)(0),              // 0: paxos.ResultType
 	(*Ballot)(nil),               // 1: paxos.Ballot
 	(*Transaction)(nil),          // 2: paxos.Transaction
@@ -1363,10 +1484,12 @@ var file_proto_paxos_proto_goTypes = []any{
 	(*GetCheckpointReply)(nil),   // 17: paxos.GetCheckpointReply
 	(*StatusRequest)(nil),        // 18: paxos.StatusRequest
 	(*StatusReply)(nil),          // 19: paxos.StatusReply
-	nil,                          // 20: paxos.CheckpointRequest.StateEntry
-	nil,                          // 21: paxos.GetCheckpointReply.StateEntry
+	(*SetActiveRequest)(nil),     // 20: paxos.SetActiveRequest
+	(*SetActiveReply)(nil),       // 21: paxos.SetActiveReply
+	nil,                          // 22: paxos.CheckpointRequest.StateEntry
+	nil,                          // 23: paxos.GetCheckpointReply.StateEntry
 }
-var file_proto_paxos_proto_depIdxs = []int32{
+var file_paxos_proto_depIdxs = []int32{
 	2,  // 0: paxos.TransactionRequest.transaction:type_name -> paxos.Transaction
 	1,  // 1: paxos.TransactionReply.ballot:type_name -> paxos.Ballot
 	0,  // 2: paxos.TransactionReply.result:type_name -> paxos.ResultType
@@ -1382,8 +1505,8 @@ var file_proto_paxos_proto_depIdxs = []int32{
 	3,  // 12: paxos.CommitRequest.request:type_name -> paxos.TransactionRequest
 	1,  // 13: paxos.NewViewRequest.ballot:type_name -> paxos.Ballot
 	8,  // 14: paxos.NewViewRequest.accept_messages:type_name -> paxos.AcceptRequest
-	20, // 15: paxos.CheckpointRequest.state:type_name -> paxos.CheckpointRequest.StateEntry
-	21, // 16: paxos.GetCheckpointReply.state:type_name -> paxos.GetCheckpointReply.StateEntry
+	22, // 15: paxos.CheckpointRequest.state:type_name -> paxos.CheckpointRequest.StateEntry
+	23, // 16: paxos.GetCheckpointReply.state:type_name -> paxos.GetCheckpointReply.StateEntry
 	3,  // 17: paxos.PaxosNode.SubmitTransaction:input_type -> paxos.TransactionRequest
 	5,  // 18: paxos.PaxosNode.Prepare:input_type -> paxos.PrepareRequest
 	8,  // 19: paxos.PaxosNode.Accept:input_type -> paxos.AcceptRequest
@@ -1392,42 +1515,44 @@ var file_proto_paxos_proto_depIdxs = []int32{
 	14, // 22: paxos.PaxosNode.Checkpoint:input_type -> paxos.CheckpointRequest
 	16, // 23: paxos.PaxosNode.GetCheckpoint:input_type -> paxos.GetCheckpointRequest
 	18, // 24: paxos.PaxosNode.GetStatus:input_type -> paxos.StatusRequest
-	4,  // 25: paxos.PaxosNode.SubmitTransaction:output_type -> paxos.TransactionReply
-	7,  // 26: paxos.PaxosNode.Prepare:output_type -> paxos.PromiseReply
-	9,  // 27: paxos.PaxosNode.Accept:output_type -> paxos.AcceptedReply
-	11, // 28: paxos.PaxosNode.Commit:output_type -> paxos.CommitReply
-	13, // 29: paxos.PaxosNode.NewView:output_type -> paxos.NewViewReply
-	15, // 30: paxos.PaxosNode.Checkpoint:output_type -> paxos.CheckpointReply
-	17, // 31: paxos.PaxosNode.GetCheckpoint:output_type -> paxos.GetCheckpointReply
-	19, // 32: paxos.PaxosNode.GetStatus:output_type -> paxos.StatusReply
-	25, // [25:33] is the sub-list for method output_type
-	17, // [17:25] is the sub-list for method input_type
+	20, // 25: paxos.PaxosNode.SetActive:input_type -> paxos.SetActiveRequest
+	4,  // 26: paxos.PaxosNode.SubmitTransaction:output_type -> paxos.TransactionReply
+	7,  // 27: paxos.PaxosNode.Prepare:output_type -> paxos.PromiseReply
+	9,  // 28: paxos.PaxosNode.Accept:output_type -> paxos.AcceptedReply
+	11, // 29: paxos.PaxosNode.Commit:output_type -> paxos.CommitReply
+	13, // 30: paxos.PaxosNode.NewView:output_type -> paxos.NewViewReply
+	15, // 31: paxos.PaxosNode.Checkpoint:output_type -> paxos.CheckpointReply
+	17, // 32: paxos.PaxosNode.GetCheckpoint:output_type -> paxos.GetCheckpointReply
+	19, // 33: paxos.PaxosNode.GetStatus:output_type -> paxos.StatusReply
+	21, // 34: paxos.PaxosNode.SetActive:output_type -> paxos.SetActiveReply
+	26, // [26:35] is the sub-list for method output_type
+	17, // [17:26] is the sub-list for method input_type
 	17, // [17:17] is the sub-list for extension type_name
 	17, // [17:17] is the sub-list for extension extendee
 	0,  // [0:17] is the sub-list for field type_name
 }
 
-func init() { file_proto_paxos_proto_init() }
-func file_proto_paxos_proto_init() {
-	if File_proto_paxos_proto != nil {
+func init() { file_paxos_proto_init() }
+func file_paxos_proto_init() {
+	if File_paxos_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_paxos_proto_rawDesc), len(file_proto_paxos_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_paxos_proto_rawDesc), len(file_paxos_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_paxos_proto_goTypes,
-		DependencyIndexes: file_proto_paxos_proto_depIdxs,
-		EnumInfos:         file_proto_paxos_proto_enumTypes,
-		MessageInfos:      file_proto_paxos_proto_msgTypes,
+		GoTypes:           file_paxos_proto_goTypes,
+		DependencyIndexes: file_paxos_proto_depIdxs,
+		EnumInfos:         file_paxos_proto_enumTypes,
+		MessageInfos:      file_paxos_proto_msgTypes,
 	}.Build()
-	File_proto_paxos_proto = out.File
-	file_proto_paxos_proto_goTypes = nil
-	file_proto_paxos_proto_depIdxs = nil
+	File_paxos_proto = out.File
+	file_paxos_proto_goTypes = nil
+	file_paxos_proto_depIdxs = nil
 }

@@ -22,6 +22,9 @@ service PaxosNode {
   
   // Status and CLI
   rpc GetStatus(StatusRequest) returns (StatusReply);
+  
+  // Node control
+  rpc SetActive(SetActiveRequest) returns (SetActiveReply);
 }
 
 // Ballot number
@@ -153,4 +156,16 @@ message StatusReply {
   int32 current_leader_id = 4;
   int32 next_sequence_number = 5;
   int32 transactions_received = 6;
+}
+
+// Node control
+message SetActiveRequest {
+  int32 node_id = 1;
+  bool active = 2;  // true = active, false = inactive
+}
+
+message SetActiveReply {
+  bool success = 1;
+  int32 node_id = 2;
+  bool active = 3;  // Current active status
 }

@@ -79,19 +79,14 @@ type Node struct {
 
 	// 💾 Persistence
 	dbFilePath string
-
-	// 📸 Checkpointing
-	checkpointSeq    int32            // Sequence number of last checkpoint
-	checkpointState  map[string]int32 // State at checkpoint
-	checkpointPeriod int32            // Create checkpoint every N commits
-	commitsSinceCP   int32            // Commits since last checkpoint
 }
 
 func NewNode(id int32, cfg *config.Config) (*Node, error) {
-	// jittered timeout - use milliseconds for fast leader election
+	// jittered timeout - use milliseconds for leader election
+	// Increased to prevent election storms
 	rand.Seed(time.Now().UnixNano() + int64(id))
-	baseTimeout := 150 * time.Millisecond
-	jitter := time.Duration(rand.Intn(150)) * time.Millisecond // 0-150ms
+	baseTimeout := 500 * time.Millisecond
+	jitter := time.Duration(rand.Intn(200)) * time.Millisecond // 0-200ms
 	timerDuration := baseTimeout + jitter
 
 	n := &Node{
@@ -115,11 +110,7 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		timerDuration:     timerDuration,
 		dbFilePath:        fmt.Sprintf("data/node%d_db.json", id),
 		prepareCooldown:   time.Duration(50+rand.Intn(50)) * time.Millisecond, // 50-100ms
-		checkpointSeq:     0,
-		checkpointState:   make(map[string]int32),
-		checkpointPeriod:  10, // Checkpoint every 10 commits (can be configurable)
-		commitsSinceCP:    0,
-		heartbeatInterval: 50 * time.Millisecond, // Fast heartbeats
+		heartbeatInterval: 50 * time.Millisecond,                              // Fast heartbeats
 		heartbeatStop:     nil,
 		timerExpired:      false,
 		prepareBuffer:     make(map[string]*pb.PrepareRequest),
@@ -129,22 +120,21 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		recoverySeq:       0,
 	}
 
-	// Try to load existing database from file
-	if err := n.loadDatabase(); err != nil {
-		// If no saved state, initialize with default balances
-		log.Printf("Node %d: No saved database found, initializing with default balances", id)
-		for _, clientID := range cfg.Clients.ClientIDs {
-			n.balances[clientID] = cfg.Clients.InitialBalance
-		}
-		// Save initial state
-		if err := n.saveDatabase(); err != nil {
-			log.Printf("Node %d: Warning - failed to save initial database: %v", id, err)
-		}
-	} else {
-		log.Printf("Node %d: 💾 Loaded database from %s", id, n.dbFilePath)
+	// Initialize database with fresh balances from config (resets on every start, like logs)
+	log.Printf("Node %d: 🔄 Initializing fresh database from config", id)
+	for _, clientID := range cfg.Clients.ClientIDs {
+		n.balances[clientID] = cfg.Clients.InitialBalance
 	}
 
-	log.Printf("Node %d: Timer set to %v (base: 150ms + jitter: %v)",
+	// Save initial state to disk
+	if err := n.saveDatabase(); err != nil {
+		log.Printf("Node %d: ⚠️  Warning - failed to save initial database: %v", id, err)
+	} else {
+		log.Printf("Node %d: 💾 Initialized %s with balance %d for each client",
+			id, n.dbFilePath, cfg.Clients.InitialBalance)
+	}
+
+	log.Printf("Node %d: Timer set to %v (base: 500ms + jitter: %v)",
 		id, timerDuration, jitter)
 
 	return n, nil
@@ -183,6 +173,9 @@ func (n *Node) Start() error {
 			log.Printf("Node %d: Recovery failed: %v", n.id, err)
 		}
 	}()
+
+	// Start periodic gap detection
+	go n.startGapDetection()
 
 	n.resetLeaderTimer()
 
@@ -513,105 +506,43 @@ func (n *Node) loadDatabase() error {
 	return nil
 }
 
-// 📸 Checkpointing functions
+// startGapDetection periodically checks for gaps in the log and triggers recovery
+func (n *Node) startGapDetection() {
+	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds to avoid excessive recovery
+	defer ticker.Stop()
 
-// createCheckpoint creates and broadcasts a checkpoint (leader only)
-func (n *Node) createCheckpoint(seq int32) {
-	n.mu.Lock()
-
-	// Copy current state
-	state := make(map[string]int32, len(n.balances))
-	for k, v := range n.balances {
-		state[k] = v
-	}
-
-	n.checkpointSeq = seq
-	n.checkpointState = state
-	n.commitsSinceCP = 0
-
-	log.Printf("Node %d: 📸 Creating checkpoint at seq=%d", n.id, seq)
-	n.mu.Unlock()
-
-	// Broadcast checkpoint to all nodes
-	req := &pb.CheckpointRequest{
-		SequenceNumber: seq,
-		State:          state,
-		LeaderId:       n.id,
-	}
-
-	for nodeID, client := range n.peerClients {
-		if nodeID == n.id {
-			continue
+	for {
+		select {
+		case <-ticker.C:
+			n.checkForGaps()
+		case <-n.stopChan:
+			return
 		}
-
-		go func(nid int32, c pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			_, err := c.Checkpoint(ctx, req)
-			if err != nil {
-				log.Printf("Node %d: Failed to send checkpoint to node %d: %v", n.id, nid, err)
-			}
-		}(nodeID, client)
 	}
 }
 
-// Checkpoint RPC handler - receives checkpoint from leader
-func (n *Node) Checkpoint(ctx context.Context, req *pb.CheckpointRequest) (*pb.CheckpointReply, error) {
-	log.Printf("Node %d: 📸 Received checkpoint from leader %d at seq=%d", n.id, req.LeaderId, req.SequenceNumber)
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	// Update checkpoint
-	n.checkpointSeq = req.SequenceNumber
-	n.checkpointState = make(map[string]int32, len(req.State))
-	for k, v := range req.State {
-		n.checkpointState[k] = v
-	}
-
-	// Clean up old log entries (seq <= checkpoint)
-	for seq := range n.acceptLog {
-		if seq <= req.SequenceNumber {
-			delete(n.acceptLog, seq)
-		}
-	}
-	for seq := range n.committedLog {
-		if seq <= req.SequenceNumber {
-			delete(n.committedLog, seq)
-		}
-	}
-
-	// Discard old new-view messages (keep only the latest one if any)
-	if len(n.newViewLog) > 1 {
-		n.newViewLog = n.newViewLog[len(n.newViewLog)-1:]
-	}
-
-	log.Printf("Node %d: Cleaned up logs up to seq=%d", n.id, req.SequenceNumber)
-
-	return &pb.CheckpointReply{Success: true, NodeId: n.id}, nil
-}
-
-// GetCheckpoint RPC handler - allows nodes to fetch checkpoint from peers
-func (n *Node) GetCheckpoint(ctx context.Context, req *pb.GetCheckpointRequest) (*pb.GetCheckpointReply, error) {
+// checkForGaps checks if there are gaps in the log and triggers recovery if needed
+func (n *Node) checkForGaps() {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
-
-	if n.checkpointSeq == 0 {
-		return &pb.GetCheckpointReply{Success: false}, nil
+	if !n.isActive {
+		n.mu.RUnlock()
+		return
 	}
 
-	// Copy checkpoint state
-	state := make(map[string]int32, len(n.checkpointState))
-	for k, v := range n.checkpointState {
-		state[k] = v
+	lastExec := n.lastExecuted
+	maxSeq := lastExec
+	for seq := range n.acceptLog {
+		if seq > maxSeq {
+			maxSeq = seq
+		}
 	}
+	leaderID := n.leaderID
+	n.mu.RUnlock()
 
-	log.Printf("Node %d: Sending checkpoint (seq=%d) to node %d", n.id, n.checkpointSeq, req.NodeId)
-
-	return &pb.GetCheckpointReply{
-		Success:        true,
-		SequenceNumber: n.checkpointSeq,
-		State:          state,
-	}, nil
+	// Check for gaps - if there are gaps and no current leader election, trigger one
+	if maxSeq > lastExec+1 && leaderID > 0 {
+		log.Printf("Node %d: 🔍 Detected persistent gaps (lastExec=%d, maxSeq=%d) - triggering election for NEW-VIEW",
+			n.id, lastExec, maxSeq)
+		go n.StartLeaderElection()
+	}
 }
