@@ -1,0 +1,12 @@
+nodes:
+  1: {id: 1, address: "localhost", port: 50051}
+  2: {id: 2, address: "localhost", port: 50052}
+  3: {id: 3, address: "localhost", port: 50053}
+  4: {id: 4, address: "localhost", port: 50054}
+  5: {id: 5, address: "localhost", port: 50055}
+
+clients:
+  count: 10
+  initial_balance: 10
+  client_ids: ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+  retry_timeout_ms: 5000

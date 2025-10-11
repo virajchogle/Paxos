@@ -1,0 +1,37 @@
+# Binaries
+bin/
+*.exe
+
+# Data files
+data/
+*.json
+
+# Logs
+logs/
+*.log
+
+# Go specific
+*.o
+*.a
+*.so
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+

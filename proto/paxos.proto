@@ -1,0 +1,156 @@
+syntax = "proto3";
+package paxos;
+option go_package = "./proto";
+
+service PaxosNode {
+  // Client operations
+  rpc SubmitTransaction(TransactionRequest) returns (TransactionReply);
+  
+  // Paxos Phase 1: Leader Election
+  rpc Prepare(PrepareRequest) returns (PromiseReply);
+  
+  // Paxos Phase 2: Consensus
+  rpc Accept(AcceptRequest) returns (AcceptedReply);
+  rpc Commit(CommitRequest) returns (CommitReply);
+  
+  // Leader change
+  rpc NewView(NewViewRequest) returns (NewViewReply);
+  
+  // Checkpointing
+  rpc Checkpoint(CheckpointRequest) returns (CheckpointReply);
+  rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointReply);
+  
+  // Status and CLI
+  rpc GetStatus(StatusRequest) returns (StatusReply);
+}
+
+// Ballot number
+message Ballot {
+  int32 number = 1;
+  int32 node_id = 2;
+}
+
+// Transaction
+message Transaction {
+  string sender = 1;
+  string receiver = 2;
+  int32 amount = 3;
+}
+
+// Client request
+message TransactionRequest {
+  string client_id = 1;
+  int64 timestamp = 2;
+  Transaction transaction = 3;
+}
+
+// ADD THIS ENUM
+enum ResultType {
+  SUCCESS = 0;
+  FAILED = 1;
+  INSUFFICIENT_BALANCE = 2;
+}
+
+// CHANGE THIS - use ResultType instead of string
+message TransactionReply {
+  bool success = 1;
+  string message = 2;
+  Ballot ballot = 3;
+  ResultType result = 4;  // Changed from string to ResultType
+}
+
+// Phase 1: Prepare/Promise
+message PrepareRequest {
+  Ballot ballot = 1;
+  int32 node_id = 2;
+}
+
+message AcceptedEntry {
+  Ballot ballot = 1;
+  int32 sequence_number = 2;
+  TransactionRequest request = 3;
+  bool is_noop = 4;
+}
+
+message PromiseReply {
+  bool success = 1;
+  Ballot ballot = 2;
+  repeated AcceptedEntry accept_log = 3;
+  int32 node_id = 4;
+  int32 checkpoint_seq = 5;  // Sequence number of latest checkpoint
+}
+
+// Phase 2: Accept/Accepted
+message AcceptRequest {
+  Ballot ballot = 1;
+  int32 sequence_number = 2;
+  TransactionRequest request = 3;
+  bool is_noop = 4;
+}
+
+message AcceptedReply {
+  bool success = 1;
+  Ballot ballot = 2;
+  int32 sequence_number = 3;
+  int32 node_id = 4;
+}
+
+// Commit
+message CommitRequest {
+  Ballot ballot = 1;
+  int32 sequence_number = 2;
+  TransactionRequest request = 3;
+  bool is_noop = 4;
+}
+
+message CommitReply {
+  bool success = 1;
+}
+
+// New View (after leader election)
+message NewViewRequest {
+  Ballot ballot = 1;
+  repeated AcceptRequest accept_messages = 2;
+  int32 checkpoint_seq = 3;  // Highest checkpoint from promise quorum
+}
+
+message NewViewReply {
+  bool success = 1;
+  int32 node_id = 2;
+}
+
+// Checkpointing
+message CheckpointRequest {
+  int32 sequence_number = 1;  // Last request reflected in state
+  map<string, int32> state = 2;  // Client balances (actual state, not digest)
+  int32 leader_id = 3;
+}
+
+message CheckpointReply {
+  bool success = 1;
+  int32 node_id = 2;
+}
+
+message GetCheckpointRequest {
+  int32 node_id = 1;  // Requesting node
+}
+
+message GetCheckpointReply {
+  bool success = 1;
+  int32 sequence_number = 2;
+  map<string, int32> state = 3;
+}
+
+// Status
+message StatusRequest {
+  int32 node_id = 1;
+}
+
+message StatusReply {
+  int32 node_id = 1;
+  bool is_leader = 2;
+  int32 current_ballot_number = 3;
+  int32 current_leader_id = 4;
+  int32 next_sequence_number = 5;
+  int32 transactions_received = 6;
+}

@@ -1,0 +1,481 @@
+package node
+
+import (
+	"context"
+	"log"
+	"sync"
+	"time"
+
+	"paxos-banking/internal/types"
+	pb "paxos-banking/proto"
+)
+
+// StartLeaderElection initiates leader election (Paxos Phase 1)
+func (n *Node) StartLeaderElection() {
+	// cooldown + guard
+	n.mu.Lock()
+	if time.Since(n.lastPrepareTime) < n.prepareCooldown {
+		n.mu.Unlock()
+		return
+	}
+	// compute tentative ballot locally (don't mutate shared ballot yet)
+	tentativeNum := n.currentBallot.Number + 1
+	tentative := types.NewBallot(tentativeNum, n.id)
+	n.lastPrepareTime = time.Now()
+	n.mu.Unlock()
+
+	log.Printf("Node %d: 🗳️  Starting election with ballot %s", n.id, tentative.String())
+
+	// Snapshot peers and local promised ballot under read lock
+	n.mu.RLock()
+	peers := make(map[int32]pb.PaxosNodeClient, len(n.peerClients))
+	for k, v := range n.peerClients {
+		peers[k] = v
+	}
+	localPromised := types.NewBallot(n.promisedBallot.Number, n.promisedBallot.NodeID)
+	n.mu.RUnlock()
+
+	// Prepare collection: concurrent RPCs
+	type promiseResult struct {
+		reply *pb.PromiseReply
+		err   error
+	}
+	promiseCh := make(chan promiseResult, len(peers)+1)
+	var wg sync.WaitGroup
+
+	// self-promise if allowed
+	promiseCount := 0
+	acceptLogs := make([][]*pb.AcceptedEntry, 0)
+	highestCheckpointSeq := int32(0) // Track highest checkpoint from promise quorum
+	if tentative.Compare(localPromised) > 0 {
+		// include our own accept log
+		n.mu.RLock()
+		selfLog := n.getAcceptLog()
+		highestCheckpointSeq = n.checkpointSeq
+		n.mu.RUnlock()
+		acceptLogs = append(acceptLogs, selfLog)
+		promiseCount++
+	} else {
+		log.Printf("Node %d: cannot self-promise; promisedBallot=%s", n.id, localPromised.String())
+	}
+
+	// send prepare to peers
+	for pid, client := range peers {
+		wg.Add(1)
+		go func(peerID int32, cli pb.PaxosNodeClient) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			req := &pb.PrepareRequest{
+				Ballot: tentative.ToProto(),
+				NodeId: n.id,
+			}
+			resp, err := cli.Prepare(ctx, req)
+			promiseCh <- promiseResult{reply: resp, err: err}
+			_ = peerID
+		}(pid, client)
+	}
+
+	go func() {
+		wg.Wait()
+		close(promiseCh)
+	}()
+
+	timeout := time.After(1800 * time.Millisecond)
+collectLoop:
+	for {
+		select {
+		case pr, ok := <-promiseCh:
+			if !ok {
+				break collectLoop
+			}
+			if pr.err != nil {
+				// log error and continue
+				continue
+			}
+			if pr.reply != nil && pr.reply.Success {
+				promiseCount++
+				acceptLogs = append(acceptLogs, pr.reply.AcceptLog)
+				// Track highest checkpoint sequence number
+				if pr.reply.CheckpointSeq > highestCheckpointSeq {
+					highestCheckpointSeq = pr.reply.CheckpointSeq
+				}
+				log.Printf("Node %d: ✓ PROMISE from node %d (checkpoint_seq=%d)", n.id, pr.reply.NodeId, pr.reply.CheckpointSeq)
+			}
+			// early exit when quorum achieved
+			if n.hasQuorum(promiseCount) {
+				break collectLoop
+			}
+		case <-timeout:
+			log.Printf("Node %d: Promise collection timed out", n.id)
+			break collectLoop
+		}
+	}
+
+	if !n.hasQuorum(promiseCount) {
+		log.Printf("Node %d: ✗ No quorum (%d/%d)", n.id, promiseCount, n.quorumSize())
+		return
+	}
+
+	// become leader and set currentBallot
+	n.mu.Lock()
+	n.isLeader = true
+	n.leaderID = n.id
+	n.currentBallot = tentative
+	n.mu.Unlock()
+
+	log.Printf("Node %d: 👑 Elected as LEADER with quorum %d/%d (highest_checkpoint=%d)", n.id, promiseCount, n.quorumSize(), highestCheckpointSeq)
+
+	// Build NEW-VIEW and broadcast
+	n.sendNewView(acceptLogs, tentative, highestCheckpointSeq)
+
+	// leader actions
+	n.resetLeaderTimer()
+	n.startHeartbeat()
+}
+
+// Prepare handles incoming PREPARE
+func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.PromiseReply, error) {
+	reqBallot := types.BallotFromProto(req.Ballot)
+	log.Printf("Node %d: Received PREPARE %s from node %d", n.id, reqBallot.String(), req.NodeId)
+
+	// Quick check without lock first
+	n.mu.RLock()
+	if reqBallot.Compare(n.promisedBallot) <= 0 {
+		n.mu.RUnlock()
+		log.Printf("Node %d: Rejecting PREPARE - already promised higher", n.id)
+		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
+	}
+
+	// Copy accept log while holding read lock
+	entries := make([]*pb.AcceptedEntry, 0, len(n.acceptLog))
+	for seq, entry := range n.acceptLog {
+		if seq == 0 || entry == nil {
+			continue
+		}
+		entries = append(entries, &pb.AcceptedEntry{
+			Ballot:         entry.Ballot.ToProto(),
+			SequenceNumber: seq,
+			Request:        entry.Request,
+			IsNoop:         entry.IsNoOp,
+		})
+	}
+	wasLeader := n.isLeader
+	checkpointSeq := n.checkpointSeq // Include checkpoint info in promise
+	n.mu.RUnlock()
+
+	// Now acquire write lock briefly
+	n.mu.Lock()
+	n.promisedBallot = reqBallot
+	n.isLeader = false
+	n.leaderID = req.NodeId
+	n.mu.Unlock()
+
+	log.Printf("Node %d: ✓ PROMISE to node %d (checkpoint_seq=%d)", n.id, req.NodeId, checkpointSeq)
+
+	// Do expensive operations without any locks
+	if wasLeader {
+		n.stopHeartbeat()
+	}
+	n.resetLeaderTimer()
+
+	return &pb.PromiseReply{
+		Success:       true,
+		Ballot:        req.Ballot,
+		AcceptLog:     entries,
+		NodeId:        n.id,
+		CheckpointSeq: checkpointSeq,
+	}, nil
+}
+
+// respondToBufferedPrepare processes a buffered prepare message after timer expiry
+func (n *Node) respondToBufferedPrepare(req *pb.PrepareRequest) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	reqBallot := types.BallotFromProto(req.Ballot)
+
+	// Check if still valid
+	if reqBallot.Compare(n.promisedBallot) <= 0 {
+		log.Printf("Node %d: Buffered PREPARE %s no longer valid", n.id, reqBallot.String())
+		return
+	}
+
+	// Promise to this ballot
+	n.promisedBallot = reqBallot
+	wasLeader := n.isLeader
+	n.isLeader = false
+	n.leaderID = req.NodeId
+
+	if wasLeader {
+		n.stopHeartbeat()
+	}
+
+	log.Printf("Node %d: ✓ PROMISE to buffered PREPARE from node %d", n.id, req.NodeId)
+
+	// Note: Async promise delivery after buffering is a design limitation
+	// In the current RPC design, promises are sent as synchronous responses to Prepare calls
+	// For buffered prepares, we would need a separate ReceivePromise RPC or similar mechanism
+	// The buffered prepare handling helps prevent conflicting elections, which is the main goal
+	log.Printf("Node %d: Buffered PREPARE processed, would send PROMISE to node %d (async delivery limitation)",
+		n.id, req.NodeId)
+}
+
+func (n *Node) getAcceptLog() []*pb.AcceptedEntry {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	entries := make([]*pb.AcceptedEntry, 0, len(n.acceptLog))
+	for seq, entry := range n.acceptLog {
+		// Skip seq=0 (reserved for heartbeats only, should not be in logs)
+		if seq == 0 {
+			continue
+		}
+		entries = append(entries, &pb.AcceptedEntry{
+			Ballot:         entry.Ballot.ToProto(),
+			SequenceNumber: seq,
+			Request:        entry.Request,
+			IsNoop:         entry.IsNoOp,
+		})
+	}
+	return entries
+}
+
+func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballot, checkpointSeq int32) {
+	merged := n.mergeAcceptLogs(acceptLogs)
+	// determine max seq in merged
+	var maxSeq int32 = 0
+	for seq := range merged {
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+
+	acceptMsgs := make([]*pb.AcceptRequest, 0, maxSeq)
+	// Only include requests AFTER checkpoint (seq > checkpointSeq)
+	startSeq := checkpointSeq + 1
+	if startSeq < 1 {
+		startSeq = 1
+	}
+
+	for seq := startSeq; seq <= maxSeq; seq++ {
+		if entry, ok := merged[seq]; ok {
+			acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
+				Ballot:         ballot.ToProto(),
+				SequenceNumber: seq,
+				Request:        entry.Request,
+				IsNoop:         entry.IsNoop,
+			})
+		} else {
+			acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
+				Ballot:         ballot.ToProto(),
+				SequenceNumber: seq,
+				Request:        nil,
+				IsNoop:         true,
+			})
+		}
+	}
+
+	newView := &pb.NewViewRequest{
+		Ballot:         ballot.ToProto(),
+		AcceptMessages: acceptMsgs,
+		CheckpointSeq:  checkpointSeq,
+	}
+
+	n.mu.Lock()
+	n.newViewLog = append(n.newViewLog, newView)
+	n.nextSeqNum = maxSeq + 1
+	n.mu.Unlock()
+
+	log.Printf("Node %d: Sending NEW-VIEW with %d messages (checkpoint_seq=%d)", n.id, len(acceptMsgs), checkpointSeq)
+
+	// broadcast new-view and wait for acknowledgments
+	n.mu.RLock()
+	peers := make(map[int32]pb.PaxosNodeClient, len(n.peerClients))
+	for k, v := range n.peerClients {
+		peers[k] = v
+	}
+	n.mu.RUnlock()
+
+	// Send NEW-VIEW to all peers
+	type nvResp struct {
+		nodeID int32
+		ok     bool
+	}
+	respCh := make(chan nvResp, len(peers))
+
+	for pid, client := range peers {
+		go func(peerID int32, c pb.PaxosNodeClient) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, err := c.NewView(ctx, newView)
+			if err != nil {
+				log.Printf("Node %d: Failed to send NEW-VIEW to node %d: %v", n.id, peerID, err)
+				respCh <- nvResp{nodeID: peerID, ok: false}
+			} else {
+				respCh <- nvResp{nodeID: peerID, ok: true}
+			}
+		}(pid, client)
+	}
+
+	// Wait for responses (with timeout)
+	acceptedCount := 1 // Leader counts itself
+	timeout := time.After(3 * time.Second)
+	got := 0
+	for got < len(peers) {
+		select {
+		case r := <-respCh:
+			got++
+			if r.ok {
+				acceptedCount++
+			}
+			// Check if we have quorum
+			if n.hasQuorum(acceptedCount) {
+				log.Printf("Node %d: NEW-VIEW acknowledged by quorum (%d/%d)",
+					n.id, acceptedCount, n.quorumSize())
+				goto DONE
+			}
+		case <-timeout:
+			log.Printf("Node %d: NEW-VIEW timeout, got %d/%d acknowledgments",
+				n.id, acceptedCount, n.quorumSize())
+			goto DONE
+		}
+	}
+DONE:
+
+	// process locally (leader applies its own accept messages)
+	n.processNewView(newView)
+
+	if !n.hasQuorum(acceptedCount) {
+		log.Printf("Node %d: ⚠️  NEW-VIEW did not achieve quorum (%d/%d)",
+			n.id, acceptedCount, n.quorumSize())
+	}
+}
+
+func (n *Node) mergeAcceptLogs(logs [][]*pb.AcceptedEntry) map[int32]*pb.AcceptedEntry {
+	merged := make(map[int32]*pb.AcceptedEntry)
+	for _, l := range logs {
+		for _, ent := range l {
+			existing, ok := merged[ent.SequenceNumber]
+			if !ok {
+				merged[ent.SequenceNumber] = ent
+			} else {
+				existingBallot := types.BallotFromProto(existing.Ballot)
+				entBallot := types.BallotFromProto(ent.Ballot)
+				if entBallot.GreaterThan(existingBallot) {
+					merged[ent.SequenceNumber] = ent
+				}
+			}
+		}
+	}
+	return merged
+}
+
+func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewViewReply, error) {
+	log.Printf("Node %d: Received NEW-VIEW with %d messages", n.id, len(req.AcceptMessages))
+
+	ballot := types.BallotFromProto(req.Ballot)
+	leaderID := ballot.NodeID
+
+	// Process NEW-VIEW entries and send ACCEPTED back to leader for each
+	n.processNewView(req)
+
+	// Send ACCEPTED messages back to leader for each entry in NEW-VIEW
+	if leaderID != n.id {
+		go n.sendNewViewAcceptedMessages(req, leaderID)
+	}
+
+	return &pb.NewViewReply{Success: true, NodeId: n.id}, nil
+}
+
+// sendNewViewAcceptedMessages sends ACCEPTED replies to the leader for all NEW-VIEW entries
+func (n *Node) sendNewViewAcceptedMessages(req *pb.NewViewRequest, leaderID int32) {
+	n.mu.RLock()
+	leaderClient, exists := n.peerClients[leaderID]
+	n.mu.RUnlock()
+
+	if !exists {
+		log.Printf("Node %d: Cannot send ACCEPTED to leader %d - not connected", n.id, leaderID)
+		return
+	}
+
+	ballot := types.BallotFromProto(req.Ballot)
+
+	// Send ACCEPTED for each entry in the NEW-VIEW
+	for _, acceptMsg := range req.AcceptMessages {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		reply := &pb.AcceptedReply{
+			Success:        true,
+			Ballot:         ballot.ToProto(),
+			SequenceNumber: acceptMsg.SequenceNumber,
+			NodeId:         n.id,
+		}
+		_, err := leaderClient.Accept(ctx, acceptMsg)
+		cancel()
+
+		if err != nil {
+			log.Printf("Node %d: Failed to send ACCEPTED to leader %d for seq %d: %v",
+				n.id, leaderID, acceptMsg.SequenceNumber, err)
+		} else {
+			log.Printf("Node %d: Sent ACCEPTED to leader %d for seq %d",
+				n.id, leaderID, acceptMsg.SequenceNumber)
+		}
+		_ = reply // Not used here, but prepared for future use
+	}
+}
+
+func (n *Node) processNewView(req *pb.NewViewRequest) {
+	ballot := types.BallotFromProto(req.Ballot)
+
+	// Acquire lock briefly to update state
+	n.mu.Lock()
+
+	// Only accept NEW-VIEW if ballot is >= our promised ballot
+	// This prevents accepting stale NEW-VIEW messages from lower ballots
+	if ballot.Compare(n.promisedBallot) < 0 {
+		n.mu.Unlock()
+		log.Printf("Node %d: Ignoring NEW-VIEW with lower ballot %s (promised: %s)",
+			n.id, ballot.String(), n.promisedBallot.String())
+		return
+	}
+
+	prevLeader := n.isLeader
+	n.promisedBallot = ballot // Update our promised ballot
+	n.leaderID = ballot.NodeID
+	n.isLeader = (n.id == ballot.NodeID)
+
+	// compute max seq
+	maxSeq := int32(0)
+	for _, a := range req.AcceptMessages {
+		if a.SequenceNumber > maxSeq {
+			maxSeq = a.SequenceNumber
+		}
+	}
+	// find gaps (for logging)
+	missing := []int32{}
+	for seq := int32(1); seq <= maxSeq; seq++ {
+		if _, ok := n.acceptLog[seq]; !ok {
+			missing = append(missing, seq)
+		}
+	}
+	if len(missing) > 0 {
+		log.Printf("Node %d: Detected gaps in log: %v", n.id, missing)
+	}
+	n.mu.Unlock()
+
+	// Stop heartbeat if we were leader but no longer are
+	// MUST be called without holding n.mu to avoid deadlock
+	if prevLeader && !n.isLeader {
+		n.stopHeartbeat()
+	}
+
+	// reset follower timer to avoid immediate election
+	n.resetLeaderTimer()
+
+	// process each accept message: call Accept handler (local)
+	for _, a := range req.AcceptMessages {
+		// convert to pb.AcceptRequest and call Accept (local)
+		n.Accept(context.Background(), a)
+	}
+
+	log.Printf("Node %d: NEW-VIEW processed, caught up to seq %d", n.id, maxSeq)
+}
