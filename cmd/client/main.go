@@ -274,6 +274,15 @@ func (m *ClientManager) processNextSet() {
 	fmt.Printf("Processing %d transactions from %d clients in parallel...\n\n",
 		len(set.Transactions), len(clientTxns))
 
+	// Check if there's a leader failure at index 0 (before any transactions)
+	for _, lfIdx := range set.LeaderFailures {
+		if lfIdx == 0 {
+			fmt.Printf("\n💥 LEADER FAILURE triggered at start\n")
+			m.triggerLeaderFailure()
+			break
+		}
+	}
+
 	// Submit transactions sequentially with moderate delay
 	// This ensures deterministic ordering while being reasonably fast
 	successCount := 0
@@ -288,6 +297,15 @@ func (m *ClientManager) processNextSet() {
 				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount, err)
 		}
 
+		// Check if leader failure should occur AFTER this transaction
+		for _, lfIdx := range set.LeaderFailures {
+			if lfIdx == i+1 {
+				fmt.Printf("\n💥 LEADER FAILURE triggered after transaction %d\n", i+1)
+				m.triggerLeaderFailure()
+				break
+			}
+		}
+
 		// Moderate delay - enough for consensus + recovery, not too slow
 		if i < len(txnOrder)-1 {
 			time.Sleep(300 * time.Millisecond)
@@ -296,6 +314,71 @@ func (m *ClientManager) processNextSet() {
 
 	fmt.Printf("\n✅ Test Set %d completed! (%d/%d successful)\n",
 		set.SetNumber, successCount, len(txnOrder))
+}
+
+// triggerLeaderFailure deactivates the current leader to simulate failure
+func (m *ClientManager) triggerLeaderFailure() {
+	m.mu.Lock()
+	currentLeader := m.currentLeader
+	m.mu.Unlock()
+
+	fmt.Printf("   Current leader: Node %d\n", currentLeader)
+	fmt.Printf("   💀 Deactivating Node %d...\n", currentLeader)
+
+	// Deactivate the current leader
+	err := m.setNodeActive(currentLeader, false)
+	if err != nil {
+		fmt.Printf("   ⚠️  Failed to deactivate node %d: %v\n", currentLeader, err)
+	} else {
+		fmt.Printf("   ✅ Node %d deactivated\n", currentLeader)
+	}
+
+	// Wait for new leader election
+	fmt.Printf("   ⏳ Waiting for new leader election (3 seconds)...\n")
+	time.Sleep(3 * time.Second)
+
+	// Try to discover the new leader
+	m.discoverNewLeader()
+	fmt.Println()
+}
+
+// discoverNewLeader queries all nodes to find the new leader
+func (m *ClientManager) discoverNewLeader() {
+	fmt.Printf("   🔍 Discovering new leader...\n")
+
+	for nodeID, client := range m.nodeClients {
+		if nodeID == m.currentLeader {
+			// Skip the deactivated leader
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, err := client.GetStatus(ctx, &pb.StatusRequest{NodeId: nodeID})
+		cancel()
+
+		if err != nil {
+			continue
+		}
+
+		if resp.IsLeader {
+			m.mu.Lock()
+			m.currentLeader = nodeID
+			m.mu.Unlock()
+			fmt.Printf("   ✅ New leader discovered: Node %d\n", nodeID)
+			return
+		}
+	}
+
+	// If no leader found, just pick an active node
+	for nodeID := range m.nodeClients {
+		if nodeID != m.currentLeader {
+			m.mu.Lock()
+			m.currentLeader = nodeID
+			m.mu.Unlock()
+			fmt.Printf("   ⚠️  No leader confirmed, defaulting to Node %d\n", nodeID)
+			return
+		}
+	}
 }
 
 // sendTransactionWithRetry sends transaction with individual client timer and retry logic
