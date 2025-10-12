@@ -79,6 +79,9 @@ type Node struct {
 
 	// 💾 Persistence
 	dbFilePath string
+
+	// 🎯 System Initialization
+	systemInitialized bool
 }
 
 func NewNode(id int32, cfg *config.Config) (*Node, error) {
@@ -118,6 +121,7 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		isActive:          true,
 		isRecovering:      false,
 		recoverySeq:       0,
+		systemInitialized: false,
 	}
 
 	// Initialize database with fresh balances from config (resets on every start, like logs)
@@ -177,9 +181,10 @@ func (n *Node) Start() error {
 	// Start periodic gap detection
 	go n.startGapDetection()
 
-	n.resetLeaderTimer()
+	// Don't start leader timer on startup - wait for first transaction
+	// n.resetLeaderTimer()
 
-	log.Printf("Node %d: Ready", n.id)
+	log.Printf("Node %d: Ready (standby mode - waiting for transaction)", n.id)
 	return nil
 }
 
@@ -486,29 +491,8 @@ func (n *Node) saveDatabase() error {
 	return nil
 }
 
-// loadDatabase loads the balance state from a JSON file
-func (n *Node) loadDatabase() error {
-	data, err := os.ReadFile(n.dbFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("database file does not exist")
-		}
-		return fmt.Errorf("failed to read database file: %w", err)
-	}
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	if err := json.Unmarshal(data, &n.balances); err != nil {
-		return fmt.Errorf("failed to unmarshal balances: %w", err)
-	}
-
-	return nil
-}
-
-// startGapDetection periodically checks for gaps in the log and triggers recovery
 func (n *Node) startGapDetection() {
-	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds to avoid excessive recovery
+	ticker := time.NewTicker(2 * time.Second) // ✅ Reduced from 10s to 2s
 	defer ticker.Stop()
 
 	for {
@@ -537,12 +521,109 @@ func (n *Node) checkForGaps() {
 		}
 	}
 	leaderID := n.leaderID
+	isLeader := n.isLeader
 	n.mu.RUnlock()
 
-	// Check for gaps - if there are gaps and no current leader election, trigger one
-	if maxSeq > lastExec+1 && leaderID > 0 {
-		log.Printf("Node %d: 🔍 Detected persistent gaps (lastExec=%d, maxSeq=%d) - triggering election for NEW-VIEW",
-			n.id, lastExec, maxSeq)
-		go n.StartLeaderElection()
+	// 🔥 FIX: If we have gaps and we're NOT the leader, request the leader to trigger NEW-VIEW
+	// This breaks the deadlock where nodes with gaps wait forever for data
+	if maxSeq > lastExec+1 {
+		// Check if we have actual gaps (not just uncommitted sequences)
+		n.mu.RLock()
+		hasGaps := false
+		for seq := lastExec + 1; seq < maxSeq; seq++ {
+			if _, exists := n.acceptLog[seq]; !exists {
+				hasGaps = true
+				break
+			}
+		}
+		n.mu.RUnlock()
+
+		if hasGaps && !isLeader && leaderID > 0 {
+			// We have gaps and there's a leader - send a special request to trigger NEW-VIEW
+			log.Printf("Node %d: 🔍 Detected persistent gaps (lastExec=%d, maxSeq=%d) - requesting recovery from leader %d",
+				n.id, lastExec, maxSeq, leaderID)
+			go n.requestRecoveryFromLeader(leaderID)
+		} else if hasGaps && !isLeader && leaderID <= 0 {
+			// We have gaps but no known leader - trigger election so someone else can become leader
+			log.Printf("Node %d: 🔍 Detected persistent gaps with no leader (lastExec=%d, maxSeq=%d) - triggering election (won't become leader ourselves)",
+				n.id, lastExec, maxSeq)
+			go n.StartLeaderElection()
+		}
 	}
+}
+
+// requestRecoveryFromLeader actively requests missing sequences from peers
+// This breaks the deadlock where nodes with gaps can't recover
+func (n *Node) requestRecoveryFromLeader(leaderID int32) {
+	// Find which sequences we're missing
+	n.mu.RLock()
+	lastExec := n.lastExecuted
+	maxSeq := lastExec
+	for seq := range n.acceptLog {
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+
+	// Identify gaps
+	missingSeqs := []int32{}
+	for seq := lastExec + 1; seq <= maxSeq; seq++ {
+		if _, exists := n.acceptLog[seq]; !exists {
+			missingSeqs = append(missingSeqs, seq)
+		}
+	}
+
+	if len(missingSeqs) == 0 {
+		n.mu.RUnlock()
+		return // No gaps, nothing to do
+	}
+
+	peers := make(map[int32]pb.PaxosNodeClient)
+	for k, v := range n.peerClients {
+		peers[k] = v
+	}
+	n.mu.RUnlock()
+
+	log.Printf("Node %d: 🔄 Actively requesting missing sequences %v from peers", n.id, missingSeqs)
+
+	// Request each missing sequence from all peers until we get it
+	for _, seq := range missingSeqs {
+		// Try each peer for this sequence
+		for peerID, peerClient := range peers {
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			resp, err := peerClient.GetLogEntry(ctx, &pb.GetLogEntryRequest{
+				NodeId:         n.id,
+				SequenceNumber: seq,
+			})
+			cancel()
+
+			if err == nil && resp != nil && resp.Entry != nil {
+				// Got the entry! Add it to our log
+				log.Printf("Node %d: ✅ Received missing seq %d from node %d", n.id, seq, peerID)
+
+				// Convert to AcceptRequest and process it
+				acceptReq := &pb.AcceptRequest{
+					Ballot:         resp.Entry.Ballot,
+					SequenceNumber: resp.Entry.SequenceNumber,
+					Request:        resp.Entry.Request,
+					IsNoop:         resp.Entry.IsNoop,
+				}
+
+				n.Accept(context.Background(), acceptReq)
+
+				// Also commit and try to execute it
+				commitReq := &pb.CommitRequest{
+					Ballot:         resp.Entry.Ballot,
+					SequenceNumber: resp.Entry.SequenceNumber,
+					Request:        resp.Entry.Request,
+					IsNoop:         resp.Entry.IsNoop,
+				}
+				n.Commit(context.Background(), commitReq)
+
+				break // Got this sequence, move to next
+			}
+		}
+	}
+
+	log.Printf("Node %d: Finished requesting missing sequences, will retry on next check if gaps remain", n.id)
 }

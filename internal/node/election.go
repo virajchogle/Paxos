@@ -12,6 +12,33 @@ import (
 
 // StartLeaderElection initiates leader election (Paxos Phase 1)
 func (n *Node) StartLeaderElection() {
+	// 🔥 FIX: Don't start election if we have gaps in our own log
+	// Check for gaps between lastExecuted and max sequence in acceptLog
+	n.mu.RLock()
+	lastExec := n.lastExecuted
+	maxSeq := lastExec
+	for seq := range n.acceptLog {
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+
+	// Check if there are any gaps
+	hasGaps := false
+	for seq := lastExec + 1; seq < maxSeq; seq++ {
+		if _, exists := n.acceptLog[seq]; !exists {
+			hasGaps = true
+			break
+		}
+	}
+	n.mu.RUnlock()
+
+	if hasGaps {
+		log.Printf("Node %d: Cannot start election - have gaps in log (lastExec=%d, maxSeq=%d). Waiting for current leader to fill gaps.",
+			n.id, lastExec, maxSeq)
+		return
+	}
+
 	// cooldown + guard
 	n.mu.Lock()
 	if time.Since(n.lastPrepareTime) < n.prepareCooldown {
@@ -139,6 +166,16 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	reqBallot := types.BallotFromProto(req.Ballot)
 	log.Printf("Node %d: Received PREPARE %s from node %d", n.id, reqBallot.String(), req.NodeId)
 
+	// 🎯 Mark system as initialized when receiving PREPARE
+	n.mu.Lock()
+	if !n.systemInitialized {
+		n.systemInitialized = true
+		n.mu.Unlock()
+		log.Printf("Node %d: System initialized by PREPARE from node %d", n.id, req.NodeId)
+	} else {
+		n.mu.Unlock()
+	}
+
 	// Check if node is active
 	n.mu.RLock()
 	if !n.isActive {
@@ -154,8 +191,11 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
 	}
 
-	// Copy accept log while holding read lock
-	entries := make([]*pb.AcceptedEntry, 0, len(n.acceptLog))
+	// ✅ FIX: Copy BOTH acceptLog AND committedLog
+	seenSeqs := make(map[int32]bool)
+	entries := make([]*pb.AcceptedEntry, 0, len(n.acceptLog)+len(n.committedLog))
+
+	// First, add all acceptLog entries
 	for seq, entry := range n.acceptLog {
 		if seq == 0 || entry == nil {
 			continue
@@ -166,7 +206,24 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 			Request:        entry.Request,
 			IsNoop:         entry.IsNoOp,
 		})
+		seenSeqs[seq] = true
 	}
+
+	// Then add committedLog entries that aren't in acceptLog
+	for seq, entry := range n.committedLog {
+		if seq == 0 || entry == nil {
+			continue
+		}
+		if !seenSeqs[seq] {
+			entries = append(entries, &pb.AcceptedEntry{
+				Ballot:         entry.Ballot.ToProto(),
+				SequenceNumber: seq,
+				Request:        entry.Request,
+				IsNoop:         entry.IsNoOp,
+			})
+		}
+	}
+
 	wasLeader := n.isLeader
 	n.mu.RUnlock()
 
@@ -178,7 +235,7 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	// Setting it here causes nodes to think someone is leader even if election fails
 	n.mu.Unlock()
 
-	log.Printf("Node %d: ✓ PROMISE to node %d", n.id, req.NodeId)
+	log.Printf("Node %d: ✓ PROMISE to node %d with %d entries", n.id, req.NodeId, len(entries))
 
 	// Do expensive operations without any locks
 	if wasLeader {
@@ -248,7 +305,53 @@ func (n *Node) getAcceptLog() []*pb.AcceptedEntry {
 
 func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballot) {
 	merged := n.mergeAcceptLogs(acceptLogs)
-	// determine max seq in merged
+
+	// ✅ FIX: Also include our own committedLog to ensure no gaps
+	n.mu.RLock()
+	for seq, entry := range n.committedLog {
+		if seq == 0 {
+			continue
+		}
+		if existing, exists := merged[seq]; exists {
+			// Keep the one with higher ballot
+			existingBallot := types.BallotFromProto(existing.Ballot)
+			entryBallot := entry.Ballot
+			if entryBallot.GreaterThan(existingBallot) {
+				merged[seq] = &pb.AcceptedEntry{
+					Ballot:         entryBallot.ToProto(),
+					SequenceNumber: seq,
+					Request:        entry.Request,
+					IsNoop:         entry.IsNoOp,
+				}
+			}
+		} else {
+			// Add missing entry from our committedLog
+			merged[seq] = &pb.AcceptedEntry{
+				Ballot:         entry.Ballot.ToProto(),
+				SequenceNumber: seq,
+				Request:        entry.Request,
+				IsNoop:         entry.IsNoOp,
+			}
+		}
+	}
+
+	// Also check acceptLog for any sequences
+	for seq, entry := range n.acceptLog {
+		if seq == 0 {
+			continue
+		}
+		if _, exists := merged[seq]; !exists {
+			merged[seq] = &pb.AcceptedEntry{
+				Ballot:         entry.Ballot.ToProto(),
+				SequenceNumber: seq,
+				Request:        entry.Request,
+				IsNoop:         entry.IsNoOp,
+			}
+		}
+	}
+	n.mu.RUnlock()
+
+	// Determine max seq in merged
 	var maxSeq int32 = 0
 	for seq := range merged {
 		if seq > maxSeq {
@@ -256,25 +359,11 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 		}
 	}
 
-	// Also check our own log for any sequences we have that might be missing from others
-	n.mu.RLock()
-	ourMaxSeq := n.lastExecuted
-	for seq := range n.acceptLog {
-		if seq > ourMaxSeq {
-			ourMaxSeq = seq
-		}
-	}
-	n.mu.RUnlock()
-
-	// Use the maximum sequence number from all sources
-	if ourMaxSeq > maxSeq {
-		maxSeq = ourMaxSeq
-	}
-
 	acceptMsgs := make([]*pb.AcceptRequest, 0, maxSeq)
 	startSeq := int32(1)
 
-	// Fill in all sequences from startSeq to maxSeq, including gaps with NO-OPs
+	// 🔥 FIX: Only include sequences we actually have - don't fill gaps with NO-OPs
+	// This prevents database divergence caused by replacing real transactions with NO-OPs
 	for seq := startSeq; seq <= maxSeq; seq++ {
 		if entry, ok := merged[seq]; ok {
 			acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
@@ -284,27 +373,9 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 				IsNoop:         entry.IsNoop,
 			})
 		} else {
-			// Check if we have this sequence in our own log
-			n.mu.RLock()
-			ourEntry, hasOurEntry := n.acceptLog[seq]
-			n.mu.RUnlock()
-
-			if hasOurEntry {
-				acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
-					Ballot:         ballot.ToProto(),
-					SequenceNumber: seq,
-					Request:        ourEntry.Request,
-					IsNoop:         ourEntry.IsNoOp,
-				})
-			} else {
-				// Fill gap with NO-OP
-				acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
-					Ballot:         ballot.ToProto(),
-					SequenceNumber: seq,
-					Request:        nil,
-					IsNoop:         true,
-				})
-			}
+			// 🔥 FIX: Don't fill gaps! Log a warning instead.
+			// A node shouldn't become leader if it has gaps (checked in StartLeaderElection)
+			log.Printf("Node %d: ⚠️  WARNING: Gap at seq %d in NEW-VIEW - this should not happen!", n.id, seq)
 		}
 	}
 
@@ -318,7 +389,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 	n.nextSeqNum = maxSeq + 1
 	n.mu.Unlock()
 
-	log.Printf("Node %d: Sending NEW-VIEW with %d messages", n.id, len(acceptMsgs))
+	log.Printf("Node %d: Sending NEW-VIEW with %d messages (covering seq 1-%d)", n.id, len(acceptMsgs), maxSeq)
 
 	// broadcast new-view and wait for acknowledgments
 	n.mu.RLock()
@@ -425,6 +496,17 @@ func (n *Node) mergeAcceptLogs(logs [][]*pb.AcceptedEntry) map[int32]*pb.Accepte
 
 func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewViewReply, error) {
 	log.Printf("Node %d: Received NEW-VIEW with %d messages", n.id, len(req.AcceptMessages))
+
+	// 🎯 Mark system as initialized when receiving NEW-VIEW
+	n.mu.Lock()
+	if !n.systemInitialized {
+		n.systemInitialized = true
+		n.mu.Unlock()
+		ballot := types.BallotFromProto(req.Ballot)
+		log.Printf("Node %d: System initialized by NEW-VIEW from node %d", n.id, ballot.NodeID)
+	} else {
+		n.mu.Unlock()
+	}
 
 	// Check if node is active
 	n.mu.RLock()
@@ -571,28 +653,12 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 		if exists {
 			n.executeTransaction(seq, comm)
 		} else {
-			// Missing this sequence even after NEW-VIEW - fill with NO-OP to prevent permanent gap
-			log.Printf("Node %d: ⚠️  Still missing seq %d after NEW-VIEW - filling with NO-OP", n.id, seq)
-			n.mu.Lock()
-			noopEntry := types.NewLogEntry(
-				ballot, // already a pointer from types.BallotFromProto
-				seq,
-				&pb.TransactionRequest{
-					ClientId:  "NO-OP",
-					Timestamp: time.Now().UnixNano(),
-					Transaction: &pb.Transaction{
-						Sender:   "NO-OP",
-						Receiver: "NO-OP",
-						Amount:   0,
-					},
-				},
-				true, // isNoOp
-			)
-			noopEntry.Status = "C"
-			n.acceptLog[seq] = noopEntry
-			n.committedLog[seq] = noopEntry
-			n.mu.Unlock()
-			n.executeTransaction(seq, noopEntry)
+			// 🔥 FIX: Don't fill gaps with NO-OPs! This causes database divergence.
+			// Missing sequences should be received from the leader or other nodes.
+			// We'll wait for them to arrive naturally.
+			log.Printf("Node %d: ⚠️  Still missing seq %d after NEW-VIEW - waiting for data (NOT filling with NO-OP)", n.id, seq)
+			// Don't execute - this will leave a gap that must be filled by actual data
+			break // Stop trying to execute further sequences
 		}
 	}
 

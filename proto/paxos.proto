@@ -25,6 +25,9 @@ service PaxosNode {
   
   // Node control
   rpc SetActive(SetActiveRequest) returns (SetActiveReply);
+  
+  // Recovery - request specific log entry from peers
+  rpc GetLogEntry(GetLogEntryRequest) returns (GetLogEntryReply);
 }
 
 // Ballot number
@@ -168,4 +171,15 @@ message SetActiveReply {
   bool success = 1;
   int32 node_id = 2;
   bool active = 3;  // Current active status
+}
+
+// Recovery - request specific log entry
+message GetLogEntryRequest {
+  int32 node_id = 1;  // Requesting node
+  int32 sequence_number = 2;  // Which sequence to retrieve
+}
+
+message GetLogEntryReply {
+  bool success = 1;
+  AcceptedEntry entry = 2;  // The requested log entry
 }

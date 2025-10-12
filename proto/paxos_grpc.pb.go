@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v6.32.1
-// source: paxos.proto
+// source: proto/paxos.proto
 
 package proto
 
@@ -28,6 +28,7 @@ const (
 	PaxosNode_GetCheckpoint_FullMethodName     = "/paxos.PaxosNode/GetCheckpoint"
 	PaxosNode_GetStatus_FullMethodName         = "/paxos.PaxosNode/GetStatus"
 	PaxosNode_SetActive_FullMethodName         = "/paxos.PaxosNode/SetActive"
+	PaxosNode_GetLogEntry_FullMethodName       = "/paxos.PaxosNode/GetLogEntry"
 )
 
 // PaxosNodeClient is the client API for PaxosNode service.
@@ -50,6 +51,8 @@ type PaxosNodeClient interface {
 	GetStatus(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusReply, error)
 	// Node control
 	SetActive(ctx context.Context, in *SetActiveRequest, opts ...grpc.CallOption) (*SetActiveReply, error)
+	// Recovery - request specific log entry from peers
+	GetLogEntry(ctx context.Context, in *GetLogEntryRequest, opts ...grpc.CallOption) (*GetLogEntryReply, error)
 }
 
 type paxosNodeClient struct {
@@ -150,6 +153,16 @@ func (c *paxosNodeClient) SetActive(ctx context.Context, in *SetActiveRequest, o
 	return out, nil
 }
 
+func (c *paxosNodeClient) GetLogEntry(ctx context.Context, in *GetLogEntryRequest, opts ...grpc.CallOption) (*GetLogEntryReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetLogEntryReply)
+	err := c.cc.Invoke(ctx, PaxosNode_GetLogEntry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PaxosNodeServer is the server API for PaxosNode service.
 // All implementations must embed UnimplementedPaxosNodeServer
 // for forward compatibility.
@@ -170,6 +183,8 @@ type PaxosNodeServer interface {
 	GetStatus(context.Context, *StatusRequest) (*StatusReply, error)
 	// Node control
 	SetActive(context.Context, *SetActiveRequest) (*SetActiveReply, error)
+	// Recovery - request specific log entry from peers
+	GetLogEntry(context.Context, *GetLogEntryRequest) (*GetLogEntryReply, error)
 	mustEmbedUnimplementedPaxosNodeServer()
 }
 
@@ -206,6 +221,9 @@ func (UnimplementedPaxosNodeServer) GetStatus(context.Context, *StatusRequest) (
 }
 func (UnimplementedPaxosNodeServer) SetActive(context.Context, *SetActiveRequest) (*SetActiveReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetActive not implemented")
+}
+func (UnimplementedPaxosNodeServer) GetLogEntry(context.Context, *GetLogEntryRequest) (*GetLogEntryReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetLogEntry not implemented")
 }
 func (UnimplementedPaxosNodeServer) mustEmbedUnimplementedPaxosNodeServer() {}
 func (UnimplementedPaxosNodeServer) testEmbeddedByValue()                   {}
@@ -390,6 +408,24 @@ func _PaxosNode_SetActive_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PaxosNode_GetLogEntry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLogEntryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PaxosNodeServer).GetLogEntry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PaxosNode_GetLogEntry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PaxosNodeServer).GetLogEntry(ctx, req.(*GetLogEntryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PaxosNode_ServiceDesc is the grpc.ServiceDesc for PaxosNode service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -433,7 +469,11 @@ var PaxosNode_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "SetActive",
 			Handler:    _PaxosNode_SetActive_Handler,
 		},
+		{
+			MethodName: "GetLogEntry",
+			Handler:    _PaxosNode_GetLogEntry_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "paxos.proto",
+	Metadata: "proto/paxos.proto",
 }

@@ -105,31 +105,42 @@ func main() {
 	mgr.runInteractive()
 }
 
-// setNodeActive sets a node to active or inactive mode
+// setNodeActive sets a node to active or inactive mode with retry logic
 func (m *ClientManager) setNodeActive(nodeID int32, active bool) error {
 	client, exists := m.nodeClients[nodeID]
 	if !exists {
 		return fmt.Errorf("node %d not connected", nodeID)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	req := &pb.SetActiveRequest{
 		NodeId: nodeID,
 		Active: active,
 	}
 
-	resp, err := client.SetActive(ctx, req)
-	if err != nil {
-		return fmt.Errorf("RPC failed: %v", err)
+	// Retry up to 3 times with increasing timeout
+	maxRetries := 3
+	baseTimeout := 15 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		timeout := baseTimeout * time.Duration(attempt)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+		resp, err := client.SetActive(ctx, req)
+		cancel()
+
+		if err == nil && resp.Success {
+			return nil
+		}
+
+		if attempt < maxRetries {
+			log.Printf("Node %d: SetActive attempt %d/%d failed: %v, retrying...", nodeID, attempt, maxRetries, err)
+			time.Sleep(time.Duration(attempt) * time.Second) // Backoff: 1s, 2s, 3s
+		} else {
+			return fmt.Errorf("RPC failed after %d attempts: %v", maxRetries, err)
+		}
 	}
 
-	if !resp.Success {
-		return fmt.Errorf("node rejected request")
-	}
-
-	return nil
+	return fmt.Errorf("node rejected request after all retries")
 }
 
 func (m *ClientManager) runInteractive() {
@@ -236,6 +247,12 @@ func (m *ClientManager) processNextSet() {
 		if err := m.setNodeActive(nodeID, true); err != nil {
 			fmt.Printf("    Warning: Failed to activate node %d: %v\n", nodeID, err)
 		}
+	}
+
+	// Give activated nodes time to complete recovery and stabilize
+	if len(set.ActiveNodes) > 0 {
+		fmt.Printf("⏳ Waiting for activated nodes to complete recovery and stabilize...\n")
+		time.Sleep(5 * time.Second)
 	}
 
 	// Group transactions by client and preserve order

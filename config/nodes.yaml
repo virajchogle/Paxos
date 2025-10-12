@@ -9,4 +9,4 @@ clients:
   count: 10
   initial_balance: 10
   client_ids: ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
-  retry_timeout_ms: 5000
+  retry_timeout_ms: 50000
