@@ -26,7 +26,8 @@ type ClientManager struct {
 	currentSet    int
 	nodeClients   map[int32]pb.PaxosNodeClient
 	currentLeader int32
-	mu            sync.Mutex // Protect currentLeader
+	mu            sync.Mutex          // Protect currentLeader
+	pendingQueue  []utils.Transaction // Queue for transactions that failed due to no quorum
 }
 
 type Client struct {
@@ -61,6 +62,7 @@ func main() {
 		currentSet:    0,
 		nodeClients:   make(map[int32]pb.PaxosNodeClient),
 		currentLeader: 1, // Start with node 1
+		pendingQueue:  make([]utils.Transaction, 0),
 	}
 
 	// Initialize clients with individual timers
@@ -153,6 +155,7 @@ func (m *ClientManager) runInteractive() {
 	fmt.Println("  next           - Process next test set")
 	fmt.Println("  status         - Show current status")
 	fmt.Println("  leader         - Show current leader")
+	fmt.Println("  retry          - Retry queued transactions")
 	fmt.Println("  send <s> <r> <amt> - Send single transaction")
 	fmt.Println("  help           - Show this help")
 	fmt.Println("  quit           - Exit")
@@ -178,6 +181,9 @@ func (m *ClientManager) runInteractive() {
 			m.showStatus()
 		case "leader":
 			m.showLeader()
+		case "retry":
+			fmt.Println("Manually retrying queued transactions...")
+			m.retryQueuedTransactions()
 		case "send":
 			if len(parts) == 4 {
 				m.sendSingleTransaction(parts[1], parts[2], parts[3])
@@ -211,6 +217,12 @@ func (m *ClientManager) processNextSet() {
 	fmt.Printf("Transactions: %d\n", len(set.Transactions))
 	if len(set.LeaderFailures) > 0 {
 		fmt.Printf("Leader Failures scheduled at: %v\n", set.LeaderFailures)
+	}
+
+	// Check if we have quorum
+	hasQuorum := len(set.ActiveNodes) >= 3
+	if !hasQuorum {
+		fmt.Printf("⚠️  WARNING: Only %d active nodes - NO QUORUM! Transactions will be queued.\n", len(set.ActiveNodes))
 	}
 	fmt.Println()
 
@@ -287,14 +299,28 @@ func (m *ClientManager) processNextSet() {
 	// This ensures deterministic ordering while being reasonably fast
 	successCount := 0
 	for i, txn := range txnOrder {
-		err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
-		if err == nil {
-			fmt.Printf("✅ [%d/%d] %s → %s: %d units\n",
+		// If no quorum, immediately queue without sending to avoid polluting accept logs
+		if !hasQuorum {
+			fmt.Printf("⏸️  [%d/%d] %s → %s: %d units - QUEUED (no quorum, skipped sending)\n",
 				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
-			successCount++
+			m.mu.Lock()
+			m.pendingQueue = append(m.pendingQueue, txn)
+			m.mu.Unlock()
 		} else {
-			fmt.Printf("❌ [%d/%d] %s → %s: %d units - FAILED: %v\n",
-				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount, err)
+			// Have quorum, attempt to send
+			err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
+			if err == nil {
+				fmt.Printf("✅ [%d/%d] %s → %s: %d units\n",
+					i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
+				successCount++
+			} else {
+				// Failed even with quorum, queue for retry
+				fmt.Printf("⏸️  [%d/%d] %s → %s: %d units - QUEUED (failed, will retry)\n",
+					i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
+				m.mu.Lock()
+				m.pendingQueue = append(m.pendingQueue, txn)
+				m.mu.Unlock()
+			}
 		}
 
 		// Check if leader failure should occur AFTER this transaction
@@ -312,8 +338,58 @@ func (m *ClientManager) processNextSet() {
 		}
 	}
 
-	fmt.Printf("\n✅ Test Set %d completed! (%d/%d successful)\n",
-		set.SetNumber, successCount, len(txnOrder))
+	m.mu.Lock()
+	queueSize := len(m.pendingQueue)
+	m.mu.Unlock()
+
+	fmt.Printf("\n✅ Test Set %d completed! (%d/%d successful, %d queued)\n",
+		set.SetNumber, successCount, len(txnOrder), queueSize)
+
+	// After test set completes, check if we should retry queued transactions
+	// Only retry if we now have quorum (3+ active nodes)
+	if len(set.ActiveNodes) >= 3 && queueSize > 0 {
+		fmt.Printf("\n🔄 Quorum restored! Processing %d queued transactions...\n", queueSize)
+		m.retryQueuedTransactions()
+	}
+}
+
+// retryQueuedTransactions processes all queued transactions that failed due to no quorum
+func (m *ClientManager) retryQueuedTransactions() {
+	m.mu.Lock()
+	if len(m.pendingQueue) == 0 {
+		m.mu.Unlock()
+		return
+	}
+
+	// Copy queue and clear it
+	queuedTxns := make([]utils.Transaction, len(m.pendingQueue))
+	copy(queuedTxns, m.pendingQueue)
+	m.pendingQueue = make([]utils.Transaction, 0)
+	m.mu.Unlock()
+
+	successCount := 0
+	for i, txn := range queuedTxns {
+		// Use simple send (not retry) to avoid infinite loops
+		err := m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount)
+		if err == nil {
+			fmt.Printf("   ✅ [%d/%d] %s → %s: %d units - SUCCESS\n",
+				i+1, len(queuedTxns), txn.Sender, txn.Receiver, txn.Amount)
+			successCount++
+		} else {
+			// Re-queue if still failing
+			fmt.Printf("   ⏸️  [%d/%d] %s → %s: %d units - Still no quorum, re-queued\n",
+				i+1, len(queuedTxns), txn.Sender, txn.Receiver, txn.Amount)
+			m.mu.Lock()
+			m.pendingQueue = append(m.pendingQueue, txn)
+			m.mu.Unlock()
+		}
+
+		if i < len(queuedTxns)-1 {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	fmt.Printf("✅ Retry complete: %d/%d succeeded\n\n", successCount, len(queuedTxns))
 }
 
 // triggerLeaderFailure deactivates the current leader to simulate failure
@@ -503,6 +579,14 @@ func (m *ClientManager) showStatus() {
 	fmt.Printf("Connected Nodes: %d\n", len(m.nodeClients))
 	fmt.Printf("Current Leader: Node %d\n", m.currentLeader)
 
+	m.mu.Lock()
+	queueSize := len(m.pendingQueue)
+	m.mu.Unlock()
+
+	if queueSize > 0 {
+		fmt.Printf("⏸️  Pending Transactions: %d (queued due to no quorum)\n", queueSize)
+	}
+
 	if m.currentSet < len(m.testSets) {
 		next := m.testSets[m.currentSet]
 		fmt.Printf("\nNext Test Set: %d\n", next.SetNumber)
@@ -547,9 +631,14 @@ func (m *ClientManager) showHelp() {
 	fmt.Println()
 	fmt.Println("  status")
 	fmt.Println("    Show current progress and test set info")
+	fmt.Println("    Shows number of queued transactions")
 	fmt.Println()
 	fmt.Println("  leader")
 	fmt.Println("    Show current leader and query all nodes")
+	fmt.Println()
+	fmt.Println("  retry")
+	fmt.Println("    Manually retry all queued transactions")
+	fmt.Println("    (Transactions are auto-retried when quorum restored)")
 	fmt.Println()
 	fmt.Println("  send <sender> <receiver> <amount>")
 	fmt.Println("    Send a single transaction")
