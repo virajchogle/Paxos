@@ -40,9 +40,8 @@ type Node struct {
 	lastExecuted int32
 
 	// Logs
-	acceptLog    map[int32]*types.LogEntry
-	committedLog map[int32]*types.LogEntry
-	newViewLog   []*pb.NewViewRequest
+	log        map[int32]*types.LogEntry // Single log with status tracking (A/C/E)
+	newViewLog []*pb.NewViewRequest
 
 	// Client tracking
 	clientLastReply map[string]*pb.TransactionReply
@@ -64,18 +63,10 @@ type Node struct {
 	lastPrepareTime   time.Time
 	heartbeatInterval time.Duration
 	heartbeatStop     chan struct{}
-	timerExpired      bool // Track if leader timer has expired
-
-	// Election state
-	prepareBuffer map[string]*pb.PrepareRequest // Buffer prepare messages before timer expires
 
 	// Control
 	stopChan chan struct{}
 	isActive bool
-
-	// 🔥 Recovery state
-	isRecovering bool
-	recoverySeq  int32
 
 	// 💾 Persistence
 	dbFilePath string
@@ -102,8 +93,7 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		leaderID:          -1,
 		nextSeqNum:        1,
 		lastExecuted:      0,
-		acceptLog:         make(map[int32]*types.LogEntry),
-		committedLog:      make(map[int32]*types.LogEntry),
+		log:               make(map[int32]*types.LogEntry),
 		newViewLog:        make([]*pb.NewViewRequest, 0),
 		clientLastReply:   make(map[string]*pb.TransactionReply),
 		clientLastTS:      make(map[string]int64),
@@ -115,12 +105,8 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		prepareCooldown:   time.Duration(50+rand.Intn(50)) * time.Millisecond, // 50-100ms
 		heartbeatInterval: 50 * time.Millisecond,                              // Fast heartbeats
 		heartbeatStop:     nil,
-		timerExpired:      false,
-		prepareBuffer:     make(map[string]*pb.PrepareRequest),
 		stopChan:          make(chan struct{}),
 		isActive:          true,
-		isRecovering:      false,
-		recoverySeq:       0,
 		systemInitialized: false,
 	}
 
@@ -170,13 +156,6 @@ func (n *Node) Start() error {
 
 	// Start background reconnection for failed peers
 	go n.retryPeerConnections()
-
-	// 🔥 Start recovery phase
-	go func() {
-		if err := n.StartRecovery(); err != nil {
-			log.Printf("Node %d: Recovery failed: %v", n.id, err)
-		}
-	}()
 
 	// Start periodic gap detection
 	go n.startGapDetection()
@@ -289,55 +268,18 @@ func (n *Node) resetLeaderTimer() {
 		}
 	}
 
-	// Reset timer expiry flag
-	n.mu.Lock()
-	n.timerExpired = false
-	n.prepareBuffer = make(map[string]*pb.PrepareRequest) // Clear buffer on reset
-	n.mu.Unlock()
-
 	// create new timer
 	n.leaderTimer = time.NewTimer(n.timerDuration)
 
 	go func() {
 		<-n.leaderTimer.C
-		n.mu.Lock()
+		n.mu.RLock()
 		isLeader := n.isLeader
 		active := n.isActive
-		n.timerExpired = true // Mark timer as expired
-
-		// Process any buffered prepare messages
-		bufferedPrepares := make([]*pb.PrepareRequest, 0, len(n.prepareBuffer))
-		for _, prep := range n.prepareBuffer {
-			bufferedPrepares = append(bufferedPrepares, prep)
-		}
-		n.prepareBuffer = make(map[string]*pb.PrepareRequest) // Clear buffer
-		n.mu.Unlock()
+		n.mu.RUnlock()
 
 		if !isLeader && active {
 			log.Printf("Node %d: ⏰ Leader timeout - starting election", n.id)
-
-			// If there are buffered prepares, accept the highest one
-			if len(bufferedPrepares) > 0 {
-				var highestPrepare *pb.PrepareRequest
-				var highestBallot *types.Ballot
-
-				for _, prep := range bufferedPrepares {
-					ballot := types.BallotFromProto(prep.Ballot)
-					if highestBallot == nil || ballot.GreaterThan(highestBallot) {
-						highestBallot = ballot
-						highestPrepare = prep
-					}
-				}
-
-				if highestPrepare != nil {
-					log.Printf("Node %d: Processing buffered PREPARE %s from node %d",
-						n.id, highestBallot.String(), highestPrepare.NodeId)
-					// Process the highest prepare message
-					go n.respondToBufferedPrepare(highestPrepare)
-					return // Don't start own election if responding to buffered prepare
-				}
-			}
-
 			go n.StartLeaderElection()
 		}
 	}()
@@ -515,7 +457,7 @@ func (n *Node) checkForGaps() {
 
 	lastExec := n.lastExecuted
 	maxSeq := lastExec
-	for seq := range n.acceptLog {
+	for seq := range n.log {
 		if seq > maxSeq {
 			maxSeq = seq
 		}
@@ -531,7 +473,7 @@ func (n *Node) checkForGaps() {
 		n.mu.RLock()
 		hasGaps := false
 		for seq := lastExec + 1; seq < maxSeq; seq++ {
-			if _, exists := n.acceptLog[seq]; !exists {
+			if _, exists := n.log[seq]; !exists {
 				hasGaps = true
 				break
 			}
@@ -558,24 +500,11 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 	// Find which sequences we're missing
 	n.mu.RLock()
 	lastExec := n.lastExecuted
-	maxSeq := lastExec
-	for seq := range n.acceptLog {
-		if seq > maxSeq {
-			maxSeq = seq
+	maxSeqLocal := lastExec
+	for seq := range n.log {
+		if seq > maxSeqLocal {
+			maxSeqLocal = seq
 		}
-	}
-
-	// Identify gaps
-	missingSeqs := []int32{}
-	for seq := lastExec + 1; seq <= maxSeq; seq++ {
-		if _, exists := n.acceptLog[seq]; !exists {
-			missingSeqs = append(missingSeqs, seq)
-		}
-	}
-
-	if len(missingSeqs) == 0 {
-		n.mu.RUnlock()
-		return // No gaps, nothing to do
 	}
 
 	peers := make(map[int32]pb.PaxosNodeClient)
@@ -583,6 +512,37 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 		peers[k] = v
 	}
 	n.mu.RUnlock()
+
+	// 🔥 FIX: Query peers to find the REAL maximum sequence in the cluster
+	maxSeqCluster := maxSeqLocal
+	for peerID, peerClient := range peers {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		statusResp, err := peerClient.GetStatus(ctx, &pb.StatusRequest{NodeId: peerID})
+		cancel()
+		
+		if err == nil && statusResp.NextSequenceNumber-1 > maxSeqCluster {
+			maxSeqCluster = statusResp.NextSequenceNumber - 1
+			log.Printf("Node %d: Peer %d has advanced to seq %d", n.id, peerID, maxSeqCluster)
+		}
+	}
+
+	// Use the cluster-wide max sequence
+	maxSeq := maxSeqCluster
+
+	// Identify ALL missing sequences (including ones we didn't know about)
+	missingSeqs := []int32{}
+	for seq := lastExec + 1; seq <= maxSeq; seq++ {
+		n.mu.RLock()
+		_, exists := n.log[seq]
+		n.mu.RUnlock()
+		if !exists {
+			missingSeqs = append(missingSeqs, seq)
+		}
+	}
+
+	if len(missingSeqs) == 0 {
+		return // No gaps, nothing to do
+	}
 
 	log.Printf("Node %d: 🔄 Actively requesting missing sequences %v from peers", n.id, missingSeqs)
 

@@ -13,11 +13,11 @@ import (
 // StartLeaderElection initiates leader election (Paxos Phase 1)
 func (n *Node) StartLeaderElection() {
 	// 🔥 FIX: Don't start election if we have gaps in our own log
-	// Check for gaps between lastExecuted and max sequence in acceptLog
+	// Check for gaps between lastExecuted and max sequence in log
 	n.mu.RLock()
 	lastExec := n.lastExecuted
 	maxSeq := lastExec
-	for seq := range n.acceptLog {
+	for seq := range n.log {
 		if seq > maxSeq {
 			maxSeq = seq
 		}
@@ -26,7 +26,7 @@ func (n *Node) StartLeaderElection() {
 	// Check if there are any gaps
 	hasGaps := false
 	for seq := lastExec + 1; seq < maxSeq; seq++ {
-		if _, exists := n.acceptLog[seq]; !exists {
+		if _, exists := n.log[seq]; !exists {
 			hasGaps = true
 			break
 		}
@@ -191,12 +191,10 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
 	}
 
-	// ✅ FIX: Copy BOTH acceptLog AND committedLog
-	seenSeqs := make(map[int32]bool)
-	entries := make([]*pb.AcceptedEntry, 0, len(n.acceptLog)+len(n.committedLog))
+	// Copy all log entries
+	entries := make([]*pb.AcceptedEntry, 0, len(n.log))
 
-	// First, add all acceptLog entries
-	for seq, entry := range n.acceptLog {
+	for seq, entry := range n.log {
 		if seq == 0 || entry == nil {
 			continue
 		}
@@ -206,22 +204,6 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 			Request:        entry.Request,
 			IsNoop:         entry.IsNoOp,
 		})
-		seenSeqs[seq] = true
-	}
-
-	// Then add committedLog entries that aren't in acceptLog
-	for seq, entry := range n.committedLog {
-		if seq == 0 || entry == nil {
-			continue
-		}
-		if !seenSeqs[seq] {
-			entries = append(entries, &pb.AcceptedEntry{
-				Ballot:         entry.Ballot.ToProto(),
-				SequenceNumber: seq,
-				Request:        entry.Request,
-				IsNoop:         entry.IsNoOp,
-			})
-		}
 	}
 
 	wasLeader := n.isLeader
@@ -251,44 +233,11 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	}, nil
 }
 
-// respondToBufferedPrepare processes a buffered prepare message after timer expiry
-func (n *Node) respondToBufferedPrepare(req *pb.PrepareRequest) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	reqBallot := types.BallotFromProto(req.Ballot)
-
-	// Check if still valid
-	if reqBallot.Compare(n.promisedBallot) <= 0 {
-		log.Printf("Node %d: Buffered PREPARE %s no longer valid", n.id, reqBallot.String())
-		return
-	}
-
-	// Promise to this ballot
-	n.promisedBallot = reqBallot
-	wasLeader := n.isLeader
-	n.isLeader = false
-	n.leaderID = req.NodeId
-
-	if wasLeader {
-		n.stopHeartbeat()
-	}
-
-	log.Printf("Node %d: ✓ PROMISE to buffered PREPARE from node %d", n.id, req.NodeId)
-
-	// Note: Async promise delivery after buffering is a design limitation
-	// In the current RPC design, promises are sent as synchronous responses to Prepare calls
-	// For buffered prepares, we would need a separate ReceivePromise RPC or similar mechanism
-	// The buffered prepare handling helps prevent conflicting elections, which is the main goal
-	log.Printf("Node %d: Buffered PREPARE processed, would send PROMISE to node %d (async delivery limitation)",
-		n.id, req.NodeId)
-}
-
 func (n *Node) getAcceptLog() []*pb.AcceptedEntry {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	entries := make([]*pb.AcceptedEntry, 0, len(n.acceptLog))
-	for seq, entry := range n.acceptLog {
+	entries := make([]*pb.AcceptedEntry, 0, len(n.log))
+	for seq, entry := range n.log {
 		// Skip seq=0 (reserved for heartbeats only, should not be in logs)
 		if seq == 0 {
 			continue
@@ -306,9 +255,9 @@ func (n *Node) getAcceptLog() []*pb.AcceptedEntry {
 func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballot) {
 	merged := n.mergeAcceptLogs(acceptLogs)
 
-	// ✅ FIX: Also include our own committedLog to ensure no gaps
+	// ✅ FIX: Also include our own log to ensure no gaps
 	n.mu.RLock()
-	for seq, entry := range n.committedLog {
+	for seq, entry := range n.log {
 		if seq == 0 {
 			continue
 		}
@@ -325,22 +274,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 				}
 			}
 		} else {
-			// Add missing entry from our committedLog
-			merged[seq] = &pb.AcceptedEntry{
-				Ballot:         entry.Ballot.ToProto(),
-				SequenceNumber: seq,
-				Request:        entry.Request,
-				IsNoop:         entry.IsNoOp,
-			}
-		}
-	}
-
-	// Also check acceptLog for any sequences
-	for seq, entry := range n.acceptLog {
-		if seq == 0 {
-			continue
-		}
-		if _, exists := merged[seq]; !exists {
+			// Add missing entry from our log
 			merged[seq] = &pb.AcceptedEntry{
 				Ballot:         entry.Ballot.ToProto(),
 				SequenceNumber: seq,
@@ -518,54 +452,10 @@ func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewView
 		return &pb.NewViewReply{Success: false, NodeId: n.id}, nil
 	}
 
-	ballot := types.BallotFromProto(req.Ballot)
-	leaderID := ballot.NodeID
-
-	// Process NEW-VIEW entries and send ACCEPTED back to leader for each
+	// Process NEW-VIEW entries locally
 	n.processNewView(req)
 
-	// Send ACCEPTED messages back to leader for each entry in NEW-VIEW
-	if leaderID != n.id {
-		go n.sendNewViewAcceptedMessages(req, leaderID)
-	}
-
 	return &pb.NewViewReply{Success: true, NodeId: n.id}, nil
-}
-
-// sendNewViewAcceptedMessages sends ACCEPTED replies to the leader for all NEW-VIEW entries
-func (n *Node) sendNewViewAcceptedMessages(req *pb.NewViewRequest, leaderID int32) {
-	n.mu.RLock()
-	leaderClient, exists := n.peerClients[leaderID]
-	n.mu.RUnlock()
-
-	if !exists {
-		log.Printf("Node %d: Cannot send ACCEPTED to leader %d - not connected", n.id, leaderID)
-		return
-	}
-
-	ballot := types.BallotFromProto(req.Ballot)
-
-	// Send ACCEPTED for each entry in the NEW-VIEW
-	for _, acceptMsg := range req.AcceptMessages {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		reply := &pb.AcceptedReply{
-			Success:        true,
-			Ballot:         ballot.ToProto(),
-			SequenceNumber: acceptMsg.SequenceNumber,
-			NodeId:         n.id,
-		}
-		_, err := leaderClient.Accept(ctx, acceptMsg)
-		cancel()
-
-		if err != nil {
-			log.Printf("Node %d: Failed to send ACCEPTED to leader %d for seq %d: %v",
-				n.id, leaderID, acceptMsg.SequenceNumber, err)
-		} else {
-			log.Printf("Node %d: Sent ACCEPTED to leader %d for seq %d",
-				n.id, leaderID, acceptMsg.SequenceNumber)
-		}
-		_ = reply // Not used here, but prepared for future use
-	}
 }
 
 func (n *Node) processNewView(req *pb.NewViewRequest) {
@@ -600,7 +490,7 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 	missing := []int32{}
 	lastExec := n.lastExecuted
 	for seq := lastExec + 1; seq <= maxSeq; seq++ {
-		if _, ok := n.acceptLog[seq]; !ok {
+		if _, ok := n.log[seq]; !ok {
 			missing = append(missing, seq)
 		}
 	}
@@ -609,8 +499,6 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 		log.Printf("Node %d: Detected gaps in log: %v (lastExec=%d, maxSeq=%d)", n.id, missing, lastExec, maxSeq)
 	}
 
-	// Clear recovery flag since we're getting NEW-VIEW
-	n.isRecovering = false
 	n.mu.Unlock()
 
 	// Stop heartbeat if we were leader but no longer are
@@ -636,22 +524,21 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 
 	// Commit and execute all sequences from NEW-VIEW
 	for seq := lastExecAfter + 1; seq <= maxSeq; seq++ {
-		// First, commit the sequence if we have it in acceptLog
+		// First, commit the sequence if we have it in log
 		n.mu.Lock()
-		if entry, ok := n.acceptLog[seq]; ok {
+		if entry, ok := n.log[seq]; ok {
 			if entry.Status != "C" && entry.Status != "E" {
 				entry.Status = "C"
-				n.committedLog[seq] = entry
 			}
 		}
 		n.mu.Unlock()
 
 		// Now try to execute
 		n.mu.RLock()
-		comm, exists := n.committedLog[seq]
+		entry, exists := n.log[seq]
 		n.mu.RUnlock()
-		if exists {
-			n.executeTransaction(seq, comm)
+		if exists && (entry.Status == "C" || entry.Status == "E") {
+			n.executeTransaction(seq, entry)
 		} else {
 			// 🔥 FIX: Don't fill gaps with NO-OPs! This causes database divergence.
 			// Missing sequences should be received from the leader or other nodes.

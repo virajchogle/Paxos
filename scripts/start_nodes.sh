@@ -49,8 +49,11 @@ for i in {1..5}; do
         # Windows environment - use mintty (Git Bash terminal)
         mintty -t "Paxos Node $i" -h always /bin/bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
     else
-        # Linux/Mac - use gnome-terminal or xterm
-        if command -v gnome-terminal &> /dev/null; then
+        # macOS - use Terminal.app
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            osascript -e "tell application \"Terminal\" to do script \"cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN -id $i -config config/nodes.yaml\"" &
+        # Linux - use gnome-terminal or xterm
+        elif command -v gnome-terminal &> /dev/null; then
             gnome-terminal -- bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
         elif command -v xterm &> /dev/null; then
             xterm -T "Paxos Node $i" -e bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &

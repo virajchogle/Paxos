@@ -158,21 +158,21 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 
 // processAsLeader runs Phase 2 (send accept; collect accepted; commit; execute)
 func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply, error) {
-	// ✅ FIX: Check if this exact request is already in acceptLog or committedLog
+	// ✅ FIX: Check if this exact request is already in log
 	n.mu.Lock()
 
-	// Check acceptLog for duplicate
-	for seq, entry := range n.acceptLog {
+	// Check log for duplicate
+	for seq, entry := range n.log {
 		if entry.Request != nil &&
 			entry.Request.ClientId == req.ClientId &&
 			entry.Request.Timestamp == req.Timestamp {
 			status := entry.Status
 			n.mu.Unlock()
 
-			log.Printf("Node %d: Duplicate request %s:%d already in acceptLog at seq %d (status: %s)",
+			log.Printf("Node %d: Duplicate request %s:%d already in log at seq %d (status: %s)",
 				n.id, req.ClientId, req.Timestamp, seq, status)
 
-			// If already executed, return success
+			// If already executed or committed, return success
 			if status == "E" || status == "C" {
 				// Look for cached reply
 				lastReply, hasReply := n.clientLastReply[req.ClientId]
@@ -180,34 +180,15 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 					log.Printf("Node %d: Returning cached reply for %s:%d", n.id, req.ClientId, req.Timestamp)
 					return lastReply, nil
 				}
+				// Return success even without cached reply
+				return &pb.TransactionReply{
+					Success: true,
+					Message: "Transaction already committed",
+				}, nil
 			}
 
 			// Still being processed
 			return nil, fmt.Errorf("duplicate request already being processed at seq %d", seq)
-		}
-	}
-
-	// Check committedLog for duplicate
-	for seq, entry := range n.committedLog {
-		if entry.Request != nil &&
-			entry.Request.ClientId == req.ClientId &&
-			entry.Request.Timestamp == req.Timestamp {
-			n.mu.Unlock()
-
-			log.Printf("Node %d: Duplicate request %s:%d already committed at seq %d",
-				n.id, req.ClientId, req.Timestamp, seq)
-
-			// Look for cached reply
-			lastReply, hasReply := n.clientLastReply[req.ClientId]
-			if hasReply {
-				return lastReply, nil
-			}
-
-			// Return success even without cached reply
-			return &pb.TransactionReply{
-				Success: true,
-				Message: "Transaction already committed",
-			}, nil
 		}
 	}
 
@@ -226,7 +207,7 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 	entry.AcceptedBy[n.id] = true
 	entry.Status = "A" // accepted by leader
 	n.mu.Lock()
-	n.acceptLog[seq] = entry
+	n.log[seq] = entry
 	n.mu.Unlock()
 
 	acceptReq := &pb.AcceptRequest{
@@ -273,7 +254,7 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 			if r.ok {
 				acceptedCount++
 				n.mu.Lock()
-				if entry2, exists := n.acceptLog[seq]; exists {
+				if entry2, exists := n.log[seq]; exists {
 					entry2.AcceptedBy[r.nodeID] = true
 				}
 				n.mu.Unlock()
@@ -293,8 +274,8 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 QUORUM:
 
 	if !n.hasQuorum(acceptedCount) {
-		log.Printf("Node %d: No quorum for seq %d (%d/%d) - keeping in acceptLog for later NEW-VIEW", n.id, seq, acceptedCount, n.quorumSize())
-		// DON'T cleanup acceptLog[seq] - keep it for NEW-VIEW recovery
+		log.Printf("Node %d: No quorum for seq %d (%d/%d) - keeping in log for later NEW-VIEW", n.id, seq, acceptedCount, n.quorumSize())
+		// DON'T cleanup log[seq] - keep it for NEW-VIEW recovery
 		// When more nodes come back, this will be included in NEW-VIEW and can achieve quorum then
 		return nil, fmt.Errorf("no quorum for seq %d (have %d, need %d)", seq, acceptedCount, n.quorumSize())
 	}
@@ -344,33 +325,18 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 	// 🎯 Mark system as initialized when receiving ACCEPT
 	if !n.systemInitialized {
 		n.systemInitialized = true
-		if req.SequenceNumber > 0 { // Only log for non-heartbeat
-			reqBallot := types.BallotFromProto(req.Ballot)
-			log.Printf("Node %d: System initialized by ACCEPT from node %d", n.id, reqBallot.NodeID)
-		}
 	}
 
 	// Check if node is active
 	if !n.isActive {
 		n.mu.Unlock()
-		if req.SequenceNumber > 0 {
-			log.Printf("Node %d: Rejecting ACCEPT - node is INACTIVE", n.id)
-		}
 		return &pb.AcceptedReply{Success: false, Ballot: req.Ballot, SequenceNumber: req.SequenceNumber, NodeId: n.id}, nil
 	}
 
 	reqBallot := types.BallotFromProto(req.Ballot)
 
-	// Only log ACCEPT messages with seq > 0 (seq=0 is reserved for heartbeats)
-	if req.SequenceNumber > 0 {
-		log.Printf("Node %d: Received ACCEPT seq=%d, ballot=%s", n.id, req.SequenceNumber, reqBallot.String())
-	}
-
 	// ballot check
 	if reqBallot.Compare(n.promisedBallot) < 0 {
-		if !req.IsNoop && req.SequenceNumber > 0 {
-			log.Printf("Node %d: Rejecting ACCEPT - ballot too low", n.id)
-		}
 		n.mu.Unlock()
 		return &pb.AcceptedReply{Success: false, Ballot: req.Ballot, SequenceNumber: req.SequenceNumber, NodeId: n.id}, nil
 	}
@@ -380,23 +346,22 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 	// leader ID updated (we just heard from leader)
 	n.leaderID = reqBallot.NodeID
 
-	// create or update accept log (but never store seq=0, reserved for heartbeats)
+	// Store in log (skip seq=0 which is used for heartbeats)
 	if req.SequenceNumber > 0 {
+		log.Printf("Node %d: Received ACCEPT seq=%d, ballot=%s", n.id, req.SequenceNumber, reqBallot.String())
+		
 		ent := types.NewLogEntry(reqBallot, req.SequenceNumber, req.Request, req.IsNoop)
 		ent.Status = "A"
-		if existing, ok := n.acceptLog[req.SequenceNumber]; ok {
+		if existing, ok := n.log[req.SequenceNumber]; ok {
 			// merge: choose entry with higher ballot if necessary
 			existingBallot := existing.Ballot
 			if reqBallot.GreaterThan(existingBallot) {
-				n.acceptLog[req.SequenceNumber] = ent
+				n.log[req.SequenceNumber] = ent
 			}
 		} else {
-			n.acceptLog[req.SequenceNumber] = ent
+			n.log[req.SequenceNumber] = ent
 		}
-	}
-
-	// Only log ACCEPTED messages with seq > 0 (seq=0 is reserved for heartbeats)
-	if req.SequenceNumber > 0 {
+		
 		log.Printf("Node %d: ✓ ACCEPTED seq=%d", n.id, req.SequenceNumber)
 	}
 	n.mu.Unlock()
@@ -416,18 +381,16 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 	n.mu.RUnlock()
 
 	if !active {
-		if req.SequenceNumber > 0 {
-			log.Printf("Node %d: Rejecting COMMIT - node is INACTIVE", n.id)
-		}
 		return &pb.CommitReply{Success: false}, nil
 	}
 
-	// Only log non-heartbeat COMMIT messages (seq > 0)
-	if !req.IsNoop && req.SequenceNumber > 0 {
-		log.Printf("Node %d: Received COMMIT seq=%d", n.id, req.SequenceNumber)
+	// Log and apply commit (skip seq=0 heartbeats)
+	if req.SequenceNumber > 0 {
+		if !req.IsNoop {
+			log.Printf("Node %d: Received COMMIT seq=%d", n.id, req.SequenceNumber)
+		}
+		n.commitAndExecute(req.SequenceNumber)
 	}
-	// apply commit locally (commitAndExecute handles ordering)
-	n.commitAndExecute(req.SequenceNumber)
 
 	// Check if leader should create checkpoint
 	// Checkpointing removed for consensus correctness
@@ -439,15 +402,15 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	n.mu.Lock()
 	// ensure entry exists
-	entry, ok := n.acceptLog[seq]
+	entry, ok := n.log[seq]
 	if !ok {
-		// We received a COMMIT for a sequence we don't have in our acceptLog
+		// We received a COMMIT for a sequence we don't have in our log
 		// This means we missed the ACCEPT message (possibly while inactive)
 		lastExec := n.lastExecuted
 		n.mu.Unlock()
 
 		if seq > lastExec+1 {
-			log.Printf("Node %d: Missing acceptLog entry for seq %d (lastExecuted=%d) - will be filled by NEW-VIEW", n.id, seq, lastExec)
+			log.Printf("Node %d: Missing log entry for seq %d (lastExecuted=%d) - will be filled by NEW-VIEW", n.id, seq, lastExec)
 			// Don't trigger recovery here to avoid infinite loops
 			// The NEW-VIEW protocol will handle this
 		}
@@ -455,7 +418,6 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	}
 	// mark committed
 	entry.Status = "C"
-	n.committedLog[seq] = entry
 	n.mu.Unlock()
 
 	// execute all committed entries sequentially from lastExecuted+1
@@ -467,10 +429,11 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	for {
 		nextSeq := lastExec + 1
 		n.mu.RLock()
-		comm, exists := n.committedLog[nextSeq]
+		comm, exists := n.log[nextSeq]
 		n.mu.RUnlock()
 
-		if !exists {
+		// Only execute if entry exists and is committed or executed
+		if !exists || (comm.Status != "C" && comm.Status != "E") {
 			// No more consecutive committed sequences
 			if nextSeq <= seq {
 				log.Printf("Node %d: Gap at seq %d prevents execution (trying to reach seq %d) - waiting for NEW-VIEW", n.id, nextSeq, seq)
@@ -505,7 +468,6 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		log.Printf("Node %d: Executing NO-OP seq %d", n.id, seq)
 		entry.Status = "E"
 		n.lastExecuted = seq
-		// ✅ Keep in acceptLog for NEW-VIEW - don't delete
 		return pb.ResultType_SUCCESS
 	}
 
@@ -519,7 +481,6 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		log.Printf("Node %d: INSUFFICIENT BALANCE for %s (has %d needs %d)", n.id, sender, n.balances[sender], amt)
 		entry.Status = "E"
 		n.lastExecuted = seq
-		// ✅ Keep in acceptLog for NEW-VIEW - don't delete
 		return pb.ResultType_INSUFFICIENT_BALANCE
 	}
 
@@ -528,7 +489,6 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	n.balances[recv] += amt
 	entry.Status = "E"
 	n.lastExecuted = seq
-	// ✅ Keep in acceptLog for NEW-VIEW - don't delete
 
 	log.Printf("Node %d: ✅ EXECUTED seq=%d: %s->%s:%d (new: %s=%d, %s=%d)",
 		n.id, seq, sender, recv, amt, sender, n.balances[sender], recv, n.balances[recv])
@@ -563,7 +523,7 @@ func (n *Node) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Status
 		CurrentBallotNumber:  n.currentBallot.Number,
 		CurrentLeaderId:      n.leaderID,
 		NextSequenceNumber:   n.nextSeqNum,
-		TransactionsReceived: int32(len(n.acceptLog)),
+		TransactionsReceived: int32(len(n.log)),
 	}, nil
 }
 
@@ -588,7 +548,7 @@ func (n *Node) PrintLog() {
 	fmt.Printf("║   Node %d - Transaction Log                           ║\n", n.id)
 	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
 	for seq := int32(1); seq <= n.nextSeqNum; seq++ {
-		if ent, ok := n.acceptLog[seq]; ok {
+		if ent, ok := n.log[seq]; ok {
 			if ent.IsNoOp {
 				fmt.Printf("  Seq %d: [NO-OP] Status: %s\n", seq, ent.Status)
 			} else {
@@ -607,7 +567,7 @@ func (n *Node) PrintStatus(seq int32) {
 	fmt.Printf("\n╔════════════════════════════════════════╗\n")
 	fmt.Printf("║   Node %d - Status for Seq %d        ║\n", n.id, seq)
 	fmt.Printf("╚════════════════════════════════════════╝\n")
-	ent, ok := n.acceptLog[seq]
+	ent, ok := n.log[seq]
 	if !ok {
 		fmt.Printf("  Status: X (No entry)\n\n")
 		return
@@ -664,8 +624,7 @@ func (n *Node) ShowStatus() {
 	fmt.Printf("  Promised Ballot: %s\n", n.promisedBallot.String())
 	fmt.Printf("  Next Sequence: %d\n", n.nextSeqNum)
 	fmt.Printf("  Last Executed: %d\n", n.lastExecuted)
-	fmt.Printf("  Accepted Entries: %d\n", len(n.acceptLog))
-	fmt.Printf("  Committed Entries: %d\n", len(n.committedLog))
+	fmt.Printf("  Log Entries: %d\n", len(n.log))
 	fmt.Printf("  NEW-VIEW Count: %d\n", len(n.newViewLog))
 	fmt.Printf("  Active: %v\n", n.isActive)
 	fmt.Println()
@@ -703,58 +662,12 @@ func (n *Node) SetActive(ctx context.Context, req *pb.SetActiveRequest) (*pb.Set
 		} else {
 			log.Printf("Node %d: ✅ Node set to ACTIVE (was inactive)", n.id)
 
-			// ✅ FIX: Check for gaps IMMEDIATELY upon reactivation
-			n.mu.RLock()
-			lastExec := n.lastExecuted
-			maxSeqAccept := lastExec
-			maxSeqCommit := lastExec
-
-			for seq := range n.acceptLog {
-				if seq > maxSeqAccept {
-					maxSeqAccept = seq
-				}
-			}
-			for seq := range n.committedLog {
-				if seq > maxSeqCommit {
-					maxSeqCommit = seq
-				}
-			}
-
-			maxSeq := maxSeqAccept
-			if maxSeqCommit > maxSeq {
-				maxSeq = maxSeqCommit
-			}
-			n.mu.RUnlock()
-
-			// If we have ANY gap or are behind, trigger election for NEW-VIEW immediately
-			hasGap := false
-			for seq := lastExec + 1; seq <= maxSeq; seq++ {
-				n.mu.RLock()
-				_, inAccept := n.acceptLog[seq]
-				_, inCommit := n.committedLog[seq]
-				n.mu.RUnlock()
-				if !inAccept && !inCommit {
-					hasGap = true
-					break
-				}
-			}
-
-			if hasGap || maxSeq > lastExec+1 {
-				log.Printf("Node %d: ⚠️  Detected gaps/lag after reactivation (lastExec=%d, maxSeq=%d) - triggering immediate election for recovery",
-					n.id, lastExec, maxSeq)
-				// Trigger election immediately to get NEW-VIEW
-				go func() {
-					time.Sleep(100 * time.Millisecond)
-					n.StartLeaderElection()
-				}()
-			} else {
-				// No gaps detected
-				if !wasLeader && currentLeaderID <= 0 {
-					log.Printf("Node %d: No known leader - starting election", n.id)
-					go n.StartLeaderElection()
-				} else if !wasLeader && currentLeaderID > 0 {
-					log.Printf("Node %d: Believes leader is %d", n.id, currentLeaderID)
-				}
+			// Start election if no known leader (checkForGaps will handle gap detection)
+			if !wasLeader && currentLeaderID <= 0 {
+				log.Printf("Node %d: No known leader - starting election", n.id)
+				go n.StartLeaderElection()
+			} else if !wasLeader && currentLeaderID > 0 {
+				log.Printf("Node %d: Believes leader is %d", n.id, currentLeaderID)
 			}
 		}
 	} else {
@@ -782,21 +695,8 @@ func (n *Node) GetLogEntry(ctx context.Context, req *pb.GetLogEntryRequest) (*pb
 
 	seq := req.SequenceNumber
 
-	// First check acceptLog
-	if entry, exists := n.acceptLog[seq]; exists {
-		return &pb.GetLogEntryReply{
-			Success: true,
-			Entry: &pb.AcceptedEntry{
-				Ballot:         entry.Ballot.ToProto(),
-				SequenceNumber: seq,
-				Request:        entry.Request,
-				IsNoop:         entry.IsNoOp,
-			},
-		}, nil
-	}
-
-	// Then check committedLog
-	if entry, exists := n.committedLog[seq]; exists {
+	// Check log
+	if entry, exists := n.log[seq]; exists {
 		return &pb.GetLogEntryReply{
 			Success: true,
 			Entry: &pb.AcceptedEntry{
