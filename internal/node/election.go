@@ -452,6 +452,22 @@ func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewView
 		return &pb.NewViewReply{Success: false, NodeId: n.id}, nil
 	}
 
+	// Store NEW-VIEW message for PrintView (before processing)
+	n.mu.Lock()
+	// Check if we already have this exact NEW-VIEW (avoid duplicates)
+	alreadyStored := false
+	for _, stored := range n.newViewLog {
+		if stored.Ballot.Number == req.Ballot.Number &&
+			stored.Ballot.NodeId == req.Ballot.NodeId {
+			alreadyStored = true
+			break
+		}
+	}
+	if !alreadyStored {
+		n.newViewLog = append(n.newViewLog, req)
+	}
+	n.mu.Unlock()
+
 	// Process NEW-VIEW entries locally
 	n.processNewView(req)
 

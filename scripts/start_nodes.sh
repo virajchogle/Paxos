@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Starting all 5 nodes in separate windows..."
+echo "Starting all 9 nodes in 3 clusters (separate windows)..."
 mkdir -p logs
 
 # Determine which binary to use
@@ -41,7 +41,8 @@ else
 fi
 
 # Start each node in a separate terminal window
-for i in {1..5}; do
+# Cluster 1: nodes 1-3, Cluster 2: nodes 4-6, Cluster 3: nodes 7-9
+for i in {1..9}; do
     echo "Starting node $i in new window..."
     
     # For Git Bash on Windows or WSL
@@ -67,7 +68,10 @@ for i in {1..5}; do
 done
 
 echo ""
-echo "✅ All 5 nodes started in separate windows!"
+echo "✅ All 9 nodes started in separate windows!"
+echo "   - Cluster 1: nodes 1-3 (data items 1-3000)"
+echo "   - Cluster 2: nodes 4-6 (data items 3001-6000)"
+echo "   - Cluster 3: nodes 7-9 (data items 6001-9000)"
 echo "   - Each node runs in its own window"
 echo "   - Logs are also saved to logs/nodeX.log"
 echo "   - Close windows or press Ctrl+C in each to stop"

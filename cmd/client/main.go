@@ -21,13 +21,15 @@ import (
 )
 
 type ClientManager struct {
-	clients       map[string]*Client
-	testSets      []utils.TestSet
-	currentSet    int
-	nodeClients   map[int32]pb.PaxosNodeClient
-	currentLeader int32
-	mu            sync.Mutex          // Protect currentLeader
-	pendingQueue  []utils.Transaction // Queue for transactions that failed due to no quorum
+	clients        map[string]*Client
+	testSets       []utils.TestSet
+	currentSet     int
+	nodeClients    map[int32]pb.PaxosNodeClient
+	currentLeader  int32
+	clusterLeaders map[int32]int32 // clusterID -> leaderNodeID
+	config         *config.Config  // Store config for cluster lookups
+	mu             sync.Mutex      // Protect currentLeader and clusterLeaders
+	pendingQueue   []utils.Command // Queue for commands that failed due to no quorum
 }
 
 type Client struct {
@@ -44,6 +46,12 @@ func main() {
 	configFile := flag.String("config", "config/nodes.yaml", "Config file")
 	flag.Parse()
 
+	// Support positional argument for testfile (backward compatibility)
+	if flag.NArg() > 0 {
+		testFileArg := flag.Arg(0)
+		testFile = &testFileArg
+	}
+
 	cfg, err := config.LoadConfig(*configFile)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -57,27 +65,30 @@ func main() {
 	// Successfully loaded test sets
 
 	mgr := &ClientManager{
-		clients:       make(map[string]*Client),
-		testSets:      testSets,
-		currentSet:    0,
-		nodeClients:   make(map[int32]pb.PaxosNodeClient),
-		currentLeader: 1, // Start with node 1
-		pendingQueue:  make([]utils.Transaction, 0),
+		clients:        make(map[string]*Client),
+		testSets:       testSets,
+		currentSet:     0,
+		nodeClients:    make(map[int32]pb.PaxosNodeClient),
+		currentLeader:  1, // Start with node 1
+		clusterLeaders: make(map[int32]int32),
+		config:         cfg,
+		pendingQueue:   make([]utils.Command, 0),
 	}
 
-	// Initialize clients with individual timers
-	for _, clientID := range cfg.Clients.ClientIDs {
-		mgr.clients[clientID] = &Client{
-			id:            clientID,
-			timestamp:     0,
-			retryTimeout:  time.Duration(cfg.Clients.RetryTimeoutMs) * time.Millisecond,
-			lastRequestTS: 0,
+	// Initialize cluster leaders with first node of each cluster
+	for clusterID := range cfg.Clusters {
+		nodes := cfg.GetNodesInCluster(clusterID)
+		if len(nodes) > 0 {
+			mgr.clusterLeaders[int32(clusterID)] = int32(nodes[0])
 		}
 	}
 
-	// Connect to all nodes
+	// No longer need individual clients per data item (changed from string client IDs to int32 data item IDs)
+	// Transactions now reference data item IDs (1-9000) directly
+
+	// Connect to all 9 nodes across 3 clusters
 	fmt.Println("Connecting to nodes...")
-	for nodeID := 1; nodeID <= 5; nodeID++ {
+	for nodeID := 1; nodeID <= 9; nodeID++ {
 		address := cfg.GetNodeAddress(nodeID)
 
 		conn, err := grpc.NewClient(address,
@@ -156,7 +167,14 @@ func (m *ClientManager) runInteractive() {
 	fmt.Println("  status         - Show current status")
 	fmt.Println("  leader         - Show current leader")
 	fmt.Println("  retry          - Retry queued transactions")
-	fmt.Println("  send <s> <r> <amt> - Send single transaction")
+	fmt.Println("  send <s> <r> <amt> - Send single transaction (s,r=data item IDs 1-9000)")
+	fmt.Println("  balance <id>   - Query balance of data item (read-only, no consensus)")
+	fmt.Println("  printbalance <id> - PrintBalance function (all nodes in cluster)")
+	fmt.Println("  printdb        - PrintDB function (all 9 nodes in parallel)")
+	fmt.Println("  printview      - PrintView function (NEW-VIEW messages)")
+	fmt.Println("  printreshard   - PrintReshard function (trigger resharding)")
+	fmt.Println("  flush          - Flush system state (reset all nodes)")
+	fmt.Println("  performance    - Get performance metrics from all nodes")
 	fmt.Println("  help           - Show this help")
 	fmt.Println("  quit           - Exit")
 	fmt.Println()
@@ -190,6 +208,28 @@ func (m *ClientManager) runInteractive() {
 			} else {
 				fmt.Println("Usage: send <sender> <receiver> <amount>")
 			}
+		case "balance":
+			if len(parts) == 2 {
+				m.queryBalance(parts[1])
+			} else {
+				fmt.Println("Usage: balance <data_item_id>")
+			}
+		case "printbalance":
+			if len(parts) == 2 {
+				m.printBalanceAllNodes(parts[1])
+			} else {
+				fmt.Println("Usage: printbalance <data_item_id>")
+			}
+		case "printdb":
+			m.printDBAllNodes()
+		case "printview":
+			m.printViewAllNodes()
+		case "printreshard":
+			m.printReshard()
+		case "flush":
+			m.flushAllNodes()
+		case "performance", "perf":
+			m.performanceAllNodes()
 		case "help":
 			m.showHelp()
 		case "quit", "exit":
@@ -214,10 +254,7 @@ func (m *ClientManager) processNextSet() {
 	fmt.Printf("║  Processing Test Set %d               ║\n", set.SetNumber)
 	fmt.Printf("╚════════════════════════════════════════╝\n")
 	fmt.Printf("Active Nodes: %v\n", set.ActiveNodes)
-	fmt.Printf("Transactions: %d\n", len(set.Transactions))
-	if len(set.LeaderFailures) > 0 {
-		fmt.Printf("Leader Failures scheduled at: %v\n", set.LeaderFailures)
-	}
+	fmt.Printf("Commands: %d\n", len(set.Commands))
 
 	// Check if we have quorum
 	hasQuorum := len(set.ActiveNodes) >= 3
@@ -267,74 +304,90 @@ func (m *ClientManager) processNextSet() {
 		time.Sleep(5 * time.Second)
 	}
 
-	// Group transactions by client and preserve order
-	clientTxns := make(map[string][]struct {
-		txn utils.Transaction
-		idx int
-	})
-	txnOrder := make([]utils.Transaction, 0, len(set.Transactions))
+	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
 
-	// Assign global order numbers to transactions
-	for i, txn := range set.Transactions {
-		clientTxns[txn.Sender] = append(clientTxns[txn.Sender], struct {
-			txn utils.Transaction
-			idx int
-		}{txn: txn, idx: i})
-		txnOrder = append(txnOrder, txn)
-	}
-
-	fmt.Printf("Processing %d transactions from %d clients in parallel...\n\n",
-		len(set.Transactions), len(clientTxns))
-
-	// Check if there's a leader failure at index 0 (before any transactions)
-	for _, lfIdx := range set.LeaderFailures {
-		if lfIdx == 0 {
-			fmt.Printf("\n💥 LEADER FAILURE triggered at start\n")
-			m.triggerLeaderFailure()
-			break
-		}
-	}
-
-	// Submit transactions sequentially with moderate delay
-	// This ensures deterministic ordering while being reasonably fast
+	// Process commands sequentially
 	successCount := 0
-	for i, txn := range txnOrder {
-		// If no quorum, immediately queue without sending to avoid polluting accept logs
-		if !hasQuorum {
-			fmt.Printf("⏸️  [%d/%d] %s → %s: %d units - QUEUED (no quorum, skipped sending)\n",
-				i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
-			m.mu.Lock()
-			m.pendingQueue = append(m.pendingQueue, txn)
-			m.mu.Unlock()
-		} else {
-			// Have quorum, attempt to send
-			err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
-			if err == nil {
-				fmt.Printf("✅ [%d/%d] %s → %s: %d units\n",
-					i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
-				successCount++
+	for i, cmd := range set.Commands {
+		switch cmd.Type {
+		case "fail":
+			// F(ni) - Fail node
+			fmt.Printf("💥 [%d/%d] F(n%d) - Failing node %d...\n", i+1, len(set.Commands), cmd.NodeID, cmd.NodeID)
+			if err := m.setNodeActive(cmd.NodeID, false); err != nil {
+				fmt.Printf("    ⚠️  Failed to deactivate node %d: %v\n", cmd.NodeID, err)
 			} else {
-				// Failed even with quorum, queue for retry
-				fmt.Printf("⏸️  [%d/%d] %s → %s: %d units - QUEUED (failed, will retry)\n",
-					i+1, len(txnOrder), txn.Sender, txn.Receiver, txn.Amount)
+				fmt.Printf("    ✅ Node %d deactivated\n", cmd.NodeID)
+			}
+			time.Sleep(500 * time.Millisecond) // Give time for failure to propagate
+
+		case "recover":
+			// R(ni) - Recover node
+			fmt.Printf("🔄 [%d/%d] R(n%d) - Recovering node %d...\n", i+1, len(set.Commands), cmd.NodeID, cmd.NodeID)
+			if err := m.setNodeActive(cmd.NodeID, true); err != nil {
+				fmt.Printf("    ⚠️  Failed to activate node %d: %v\n", cmd.NodeID, err)
+			} else {
+				fmt.Printf("    ✅ Node %d activated\n", cmd.NodeID)
+			}
+			time.Sleep(1 * time.Second) // Give time for recovery
+
+		case "balance":
+			// Balance query (read-only)
+			fmt.Printf("📖 [%d/%d] Balance query for item %d...\n", i+1, len(set.Commands), cmd.Transaction.Sender)
+			m.queryBalance(fmt.Sprintf("%d", cmd.Transaction.Sender))
+
+		case "transaction":
+			// Regular transaction
+			txn := cmd.Transaction
+
+			// If no quorum, immediately queue without sending
+			if !hasQuorum {
+				fmt.Printf("⏸️  [%d/%d] %d → %d: %d units - QUEUED (no quorum)\n",
+					i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount)
 				m.mu.Lock()
-				m.pendingQueue = append(m.pendingQueue, txn)
+				m.pendingQueue = append(m.pendingQueue, cmd)
 				m.mu.Unlock()
+			} else {
+				// Have quorum, attempt to send
+				senderCluster := m.getClusterForDataItem(txn.Sender)
+				receiverCluster := m.getClusterForDataItem(txn.Receiver)
+
+				err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
+				if err == nil {
+					if senderCluster == receiverCluster {
+						fmt.Printf("✅ [%d/%d] %d → %d: %d units (Cluster %d)\n",
+							i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster)
+					} else {
+						fmt.Printf("✅ [%d/%d] %d → %d: %d units (C%d→C%d cross-shard)\n",
+							i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster)
+					}
+					successCount++
+				} else {
+					// Check if it's a business logic failure
+					errMsg := err.Error()
+					if strings.Contains(errMsg, "transaction failed:") || strings.Contains(errMsg, "Insufficient balance") {
+						// Business logic error - mark as FAILED (don't queue)
+						if senderCluster == receiverCluster {
+							fmt.Printf("❌ [%d/%d] %d → %d: %d units (Cluster %d) - FAILED: %s\n",
+								i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster, errMsg)
+						} else {
+							fmt.Printf("❌ [%d/%d] %d → %d: %d units (C%d→C%d cross-shard) - FAILED: %s\n",
+								i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster, errMsg)
+						}
+					} else {
+						// Network/timeout error - queue for retry
+						fmt.Printf("⏸️  [%d/%d] %d → %d: %d units - QUEUED (%s)\n",
+							i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, errMsg)
+						m.mu.Lock()
+						m.pendingQueue = append(m.pendingQueue, cmd)
+						m.mu.Unlock()
+					}
+				}
 			}
 		}
 
-		// Check if leader failure should occur AFTER this transaction
-		for _, lfIdx := range set.LeaderFailures {
-			if lfIdx == i+1 {
-				fmt.Printf("\n💥 LEADER FAILURE triggered after transaction %d\n", i+1)
-				m.triggerLeaderFailure()
-				break
-			}
-		}
-
-		// Moderate delay - enough for consensus + recovery, not too slow
-		if i < len(txnOrder)-1 {
-			time.Sleep(300 * time.Millisecond)
+		// Minimal delay between commands
+		if i < len(set.Commands)-1 {
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 
@@ -342,8 +395,8 @@ func (m *ClientManager) processNextSet() {
 	queueSize := len(m.pendingQueue)
 	m.mu.Unlock()
 
-	fmt.Printf("\n✅ Test Set %d completed! (%d/%d successful, %d queued)\n",
-		set.SetNumber, successCount, len(txnOrder), queueSize)
+	fmt.Printf("\n✅ Test Set %d completed! (%d successful, %d queued)\n",
+		set.SetNumber, successCount, queueSize)
 
 	// After test set completes, check if we should retry queued transactions
 	// Only retry if we now have quorum (3+ active nodes)
@@ -353,7 +406,7 @@ func (m *ClientManager) processNextSet() {
 	}
 }
 
-// retryQueuedTransactions processes all queued transactions that failed due to no quorum
+// retryQueuedTransactions processes all queued commands that failed due to no quorum
 func (m *ClientManager) retryQueuedTransactions() {
 	m.mu.Lock()
 	if len(m.pendingQueue) == 0 {
@@ -362,34 +415,38 @@ func (m *ClientManager) retryQueuedTransactions() {
 	}
 
 	// Copy queue and clear it
-	queuedTxns := make([]utils.Transaction, len(m.pendingQueue))
-	copy(queuedTxns, m.pendingQueue)
-	m.pendingQueue = make([]utils.Transaction, 0)
+	queuedCmds := make([]utils.Command, len(m.pendingQueue))
+	copy(queuedCmds, m.pendingQueue)
+	m.pendingQueue = make([]utils.Command, 0)
 	m.mu.Unlock()
 
 	successCount := 0
-	for i, txn := range queuedTxns {
-		// Use simple send (not retry) to avoid infinite loops
+	for i, cmd := range queuedCmds {
+		if cmd.Type != "transaction" {
+			continue // Only retry transactions
+		}
+
+		txn := cmd.Transaction
 		err := m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount)
 		if err == nil {
-			fmt.Printf("   ✅ [%d/%d] %s → %s: %d units - SUCCESS\n",
-				i+1, len(queuedTxns), txn.Sender, txn.Receiver, txn.Amount)
+			fmt.Printf("   ✅ [%d/%d] %d → %d: %d units - SUCCESS\n",
+				i+1, len(queuedCmds), txn.Sender, txn.Receiver, txn.Amount)
 			successCount++
 		} else {
 			// Re-queue if still failing
-			fmt.Printf("   ⏸️  [%d/%d] %s → %s: %d units - Still no quorum, re-queued\n",
-				i+1, len(queuedTxns), txn.Sender, txn.Receiver, txn.Amount)
+			fmt.Printf("   ⏸️  [%d/%d] %d → %d: %d units - Still no quorum, re-queued\n",
+				i+1, len(queuedCmds), txn.Sender, txn.Receiver, txn.Amount)
 			m.mu.Lock()
-			m.pendingQueue = append(m.pendingQueue, txn)
+			m.pendingQueue = append(m.pendingQueue, cmd)
 			m.mu.Unlock()
 		}
 
-		if i < len(queuedTxns)-1 {
-			time.Sleep(300 * time.Millisecond)
+		if i < len(queuedCmds)-1 {
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 
-	fmt.Printf("✅ Retry complete: %d/%d succeeded\n\n", successCount, len(queuedTxns))
+	fmt.Printf("✅ Retry complete: %d/%d succeeded\n\n", successCount, len(queuedCmds))
 }
 
 // triggerLeaderFailure deactivates the current leader to simulate failure
@@ -457,21 +514,59 @@ func (m *ClientManager) discoverNewLeader() {
 	}
 }
 
-// sendTransactionWithRetry sends transaction with individual client timer and retry logic
-func (m *ClientManager) sendTransactionWithRetry(sender, receiver string, amount int32) error {
-	client, exists := m.clients[sender]
+// getClusterForDataItem determines which cluster owns a data item
+func (m *ClientManager) getClusterForDataItem(dataItemID int32) int32 {
+	for clusterID, clusterCfg := range m.config.Clusters {
+		if dataItemID >= int32(clusterCfg.ShardStart) && dataItemID <= int32(clusterCfg.ShardEnd) {
+			return int32(clusterID)
+		}
+	}
+	// Default to cluster 1 if not found
+	return 1
+}
+
+// getTargetNodeForTransaction determines which node should handle a transaction
+// For intra-shard: returns leader of that shard's cluster
+// For cross-shard: returns leader of sender's cluster (will be 2PC coordinator)
+func (m *ClientManager) getTargetNodeForTransaction(sender, receiver int32) (int32, bool) {
+	senderCluster := m.getClusterForDataItem(sender)
+	receiverCluster := m.getClusterForDataItem(receiver)
+
+	isCrossShard := senderCluster != receiverCluster
+
+	// For both intra-shard and cross-shard, send to sender's cluster leader
+	// (sender's cluster will be the 2PC coordinator for cross-shard)
+	m.mu.Lock()
+	targetNode, exists := m.clusterLeaders[senderCluster]
+	m.mu.Unlock()
+
 	if !exists {
-		return fmt.Errorf("client %s not found", sender)
+		// Fallback: use first node in sender's cluster
+		nodes := m.config.GetNodesInCluster(int(senderCluster))
+		if len(nodes) > 0 {
+			targetNode = int32(nodes[0])
+			m.mu.Lock()
+			m.clusterLeaders[senderCluster] = targetNode
+			m.mu.Unlock()
+		} else {
+			targetNode = 1 // Last resort fallback
+		}
 	}
 
-	client.mu.Lock()
-	client.timestamp++
-	currentTS := client.timestamp
-	client.mu.Unlock()
+	return targetNode, isCrossShard
+}
+
+// sendTransactionWithRetry sends transaction with retry logic
+func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount int32) error {
+	// Generate unique client ID based on sender data item
+	clientID := fmt.Sprintf("client_%d", sender)
+
+	// Use simple timestamp counter
+	timestamp := time.Now().UnixNano()
 
 	req := &pb.TransactionRequest{
-		ClientId:  sender,
-		Timestamp: currentTS,
+		ClientId:  clientID,
+		Timestamp: timestamp,
 		Transaction: &pb.Transaction{
 			Sender:   sender,
 			Receiver: receiver,
@@ -479,94 +574,174 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver string, amount
 		},
 	}
 
-	// Start individual client timer
-	client.mu.Lock()
-	if client.timer != nil {
-		client.timer.Stop()
+	// Determine target node based on cluster-aware routing
+	targetNode, isCrossShard := m.getTargetNodeForTransaction(sender, receiver)
+
+	if isCrossShard {
+		// Cross-shard transaction - will be handled by 2PC on server side
+		log.Printf("🌐 Cross-shard transaction detected (%d→%d) - using 2PC", sender, receiver)
 	}
-	client.timer = time.NewTimer(client.retryTimeout)
-	client.mu.Unlock()
 
-	// Try current leader first
-	m.mu.Lock()
-	currentLeader := m.currentLeader
-	m.mu.Unlock()
-
-	nodeClient, exists := m.nodeClients[currentLeader]
+	nodeClient, exists := m.nodeClients[targetNode]
 	if !exists || nodeClient == nil {
-		// Try to find any available node
-		for nodeID, nc := range m.nodeClients {
-			nodeClient = nc
-			m.mu.Lock()
-			m.currentLeader = nodeID
-			m.mu.Unlock()
-			break
+		// Fallback: try other nodes in the same cluster
+		senderCluster := m.getClusterForDataItem(sender)
+		nodes := m.config.GetNodesInCluster(int(senderCluster))
+
+		for _, nodeID := range nodes {
+			nc, ok := m.nodeClients[int32(nodeID)]
+			if ok && nc != nil {
+				nodeClient = nc
+				targetNode = int32(nodeID)
+				m.mu.Lock()
+				m.clusterLeaders[senderCluster] = targetNode
+				m.mu.Unlock()
+				break
+			}
 		}
 	}
 
 	if nodeClient == nil {
-		return fmt.Errorf("no available nodes")
+		return fmt.Errorf("no available nodes in cluster for data item %d", sender)
 	}
 
-	// Create context with client's individual timeout
-	ctx, cancel := context.WithTimeout(context.Background(), client.retryTimeout)
+	// Create context with timeout (optimized for high throughput)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // Was 5s - now 500ms
 	defer cancel()
 
 	resp, err := nodeClient.SubmitTransaction(ctx, req)
 	if err != nil {
-		// Timeout occurred - broadcast to all nodes
-		for nodeID, nc := range m.nodeClients {
-			ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+		// Timeout occurred - retry with other nodes in the SAME CLUSTER
+		senderCluster := m.getClusterForDataItem(sender)
+		clusterNodes := m.config.GetNodesInCluster(int(senderCluster))
+
+		for _, nodeID := range clusterNodes {
+			if int32(nodeID) == targetNode {
+				continue // Already tried this one
+			}
+
+			nc, ok := m.nodeClients[int32(nodeID)]
+			if !ok || nc == nil {
+				continue
+			}
+
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond) // Was 3s - now 300ms
 			resp, err = nc.SubmitTransaction(ctx2, req)
 			cancel2()
 
-			if err == nil {
+			if err == nil && resp != nil && resp.Success {
+				// Update cluster leader
 				m.mu.Lock()
-				m.currentLeader = nodeID
+				m.clusterLeaders[senderCluster] = int32(nodeID)
 				m.mu.Unlock()
 				break
 			}
 		}
 
-		if err != nil {
-			return err
+		if err != nil || resp == nil || !resp.Success {
+			if resp != nil && !resp.Success {
+				return fmt.Errorf("transaction failed: %s", resp.Message)
+			}
+			return fmt.Errorf("failed to submit to cluster %d: %v", senderCluster, err)
 		}
 	}
 
-	// Stop timer on successful response
-	client.mu.Lock()
-	if client.timer != nil {
-		client.timer.Stop()
-	}
-	client.lastRequestTS = currentTS
-	client.mu.Unlock()
-
-	// Update leader based on response
-	if resp.Ballot != nil {
+	// Update cluster leader based on response
+	if resp != nil && resp.Ballot != nil {
+		senderCluster := m.getClusterForDataItem(sender)
 		m.mu.Lock()
-		m.currentLeader = resp.Ballot.NodeId
+		m.clusterLeaders[senderCluster] = resp.Ballot.NodeId
 		m.mu.Unlock()
+	}
+
+	// Check if transaction actually succeeded
+	if resp == nil {
+		return fmt.Errorf("no response received")
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("transaction failed: %s", resp.Message)
 	}
 
 	return nil
 }
 
 // sendTransaction is kept for backward compatibility and single transaction sends
-func (m *ClientManager) sendTransaction(sender, receiver string, amount int32) error {
+func (m *ClientManager) sendTransaction(sender, receiver int32, amount int32) error {
 	return m.sendTransactionWithRetry(sender, receiver, amount)
 }
 
-func (m *ClientManager) sendSingleTransaction(sender, receiver, amountStr string) {
-	var amount int32
+func (m *ClientManager) sendSingleTransaction(senderStr, receiverStr, amountStr string) {
+	var sender, receiver, amount int32
+	fmt.Sscanf(senderStr, "%d", &sender)
+	fmt.Sscanf(receiverStr, "%d", &receiver)
 	fmt.Sscanf(amountStr, "%d", &amount)
 
-	fmt.Printf("Sending: %s → %s: %d units... ", sender, receiver, amount)
+	fmt.Printf("Sending: %d → %d: %d units... ", sender, receiver, amount)
 	err := m.sendTransaction(sender, receiver, amount)
 	if err != nil {
 		fmt.Printf("❌ FAILED: %v\n", err)
 	} else {
 		fmt.Printf("✅\n")
 	}
+}
+
+// queryBalance queries the balance of a data item (Phase 3: Read-only transactions)
+func (m *ClientManager) queryBalance(dataItemIDStr string) {
+	var dataItemID int32
+	if _, err := fmt.Sscanf(dataItemIDStr, "%d", &dataItemID); err != nil {
+		fmt.Printf("❌ Invalid data item ID: %s\n", dataItemIDStr)
+		return
+	}
+
+	// Determine which cluster owns this data item
+	cluster := m.config.GetClusterForDataItem(dataItemID)
+
+	// Get any node from that cluster (read can go to any replica)
+	clusterNodes := m.config.GetNodesInCluster(cluster)
+	if len(clusterNodes) == 0 {
+		fmt.Printf("❌ No nodes found in cluster %d\n", cluster)
+		return
+	}
+
+	// Try each node in the cluster until we get a response
+	var resp *pb.BalanceQueryReply
+	var err error
+
+	for _, nodeID := range clusterNodes {
+		client, exists := m.nodeClients[int32(nodeID)]
+		if !exists || client == nil {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		resp, err = client.QueryBalance(ctx, &pb.BalanceQueryRequest{
+			DataItemId: dataItemID,
+		})
+		cancel()
+
+		if err == nil && resp != nil && resp.Success {
+			break
+		}
+	}
+
+	if err != nil {
+		fmt.Printf("❌ Query failed: %v\n", err)
+		return
+	}
+
+	if resp == nil || !resp.Success {
+		msg := "unknown error"
+		if resp != nil {
+			msg = resp.Message
+		}
+		fmt.Printf("❌ Query failed: %s\n", msg)
+		return
+	}
+
+	// Success - show balance
+	fmt.Printf("📖 Balance of item %d: %d (from node %d, cluster %d)\n",
+		dataItemID, resp.Balance, resp.NodeId, resp.ClusterId)
 }
 
 func (m *ClientManager) showStatus() {
@@ -590,7 +765,7 @@ func (m *ClientManager) showStatus() {
 	if m.currentSet < len(m.testSets) {
 		next := m.testSets[m.currentSet]
 		fmt.Printf("\nNext Test Set: %d\n", next.SetNumber)
-		fmt.Printf("  Transactions: %d\n", len(next.Transactions))
+		fmt.Printf("  Commands: %d\n", len(next.Commands))
 		fmt.Printf("  Active Nodes: %v\n", next.ActiveNodes)
 	}
 	fmt.Println()
@@ -642,7 +817,34 @@ func (m *ClientManager) showHelp() {
 	fmt.Println()
 	fmt.Println("  send <sender> <receiver> <amount>")
 	fmt.Println("    Send a single transaction")
-	fmt.Println("    Example: send A B 5")
+	fmt.Println("    Example: send 100 200 5")
+	fmt.Println()
+	fmt.Println("  balance <id>")
+	fmt.Println("    Quick balance query (single node)")
+	fmt.Println()
+	fmt.Println("  printbalance <id>")
+	fmt.Println("    PrintBalance(id) - Query all 3 nodes in cluster")
+	fmt.Println("    Output format: n4 : 8, n5 : 8, n6 : 10")
+	fmt.Println()
+	fmt.Println("  printdb")
+	fmt.Println("    PrintDB() - Query all 9 nodes in parallel")
+	fmt.Println("    Shows modified balances")
+	fmt.Println()
+	fmt.Println("  printview")
+	fmt.Println("    PrintView() - Show all NEW-VIEW messages")
+	fmt.Println("    Check node logs for detailed output")
+	fmt.Println()
+	fmt.Println("  printreshard")
+	fmt.Println("    PrintReshard() - Trigger resharding analysis")
+	fmt.Println("    Outputs triplets: (item_id, c_from, c_to)")
+	fmt.Println()
+	fmt.Println("  flush")
+	fmt.Println("    FLUSH system state (required between test sets)")
+	fmt.Println("    Resets database, logs, ballots, locks, counters")
+	fmt.Println()
+	fmt.Println("  performance")
+	fmt.Println("    Get performance metrics from all nodes")
+	fmt.Println("    Shows throughput, latency, 2PC stats")
 	fmt.Println()
 	fmt.Println("  help")
 	fmt.Println("    Show this help message")
@@ -650,8 +852,381 @@ func (m *ClientManager) showHelp() {
 	fmt.Println("  quit")
 	fmt.Println("    Exit the client manager")
 	fmt.Println()
-	fmt.Println("After each test set, you can use node CLI:")
-	fmt.Println("  ./scripts/node_cli.sh <node_id>")
-	fmt.Println("  Then: printDB, printLog, printStatus <seq>, printView")
+}
+
+// printBalanceAllNodes implements PrintBalance(id) - query all 3 nodes in the cluster
+func (m *ClientManager) printBalanceAllNodes(dataItemIDStr string) {
+	var dataItemID int32
+	if _, err := fmt.Sscanf(dataItemIDStr, "%d", &dataItemID); err != nil {
+		fmt.Printf("❌ Invalid data item ID: %s\n", dataItemIDStr)
+		return
+	}
+
+	// Determine which cluster owns this item
+	cluster := m.config.GetClusterForDataItem(dataItemID)
+	clusterNodes := m.config.GetNodesInCluster(int(cluster))
+
+	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PrintBalance(%d) - Cluster %d Nodes                  ║\n", dataItemID, cluster)
+	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+
+	// Query all nodes in parallel
+	type nodeBalance struct {
+		nodeID  int32
+		balance int32
+		err     error
+	}
+
+	resultChan := make(chan nodeBalance, len(clusterNodes))
+
+	for _, nodeID := range clusterNodes {
+		go func(nid int32) {
+			client, exists := m.nodeClients[nid]
+			if !exists {
+				resultChan <- nodeBalance{nodeID: nid, err: fmt.Errorf("not connected")}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			resp, err := client.QueryBalance(ctx, &pb.BalanceQueryRequest{
+				DataItemId: dataItemID,
+			})
+
+			if err != nil {
+				resultChan <- nodeBalance{nodeID: nid, err: err}
+			} else if !resp.Success {
+				resultChan <- nodeBalance{nodeID: nid, err: fmt.Errorf(resp.Message)}
+			} else {
+				resultChan <- nodeBalance{nodeID: nid, balance: resp.Balance, err: nil}
+			}
+		}(int32(nodeID))
+	}
+
+	// Collect results
+	results := make(map[int32]int32)
+	errors := make(map[int32]error)
+
+	for i := 0; i < len(clusterNodes); i++ {
+		result := <-resultChan
+		if result.err != nil {
+			errors[result.nodeID] = result.err
+		} else {
+			results[result.nodeID] = result.balance
+		}
+	}
+
+	// Print in format: n4 : 8, n5 : 8, n6 : 10
+	output := ""
+	for _, nodeID := range clusterNodes {
+		if balance, ok := results[int32(nodeID)]; ok {
+			if output != "" {
+				output += ", "
+			}
+			output += fmt.Sprintf("n%d : %d", nodeID, balance)
+		} else if err, ok := errors[int32(nodeID)]; ok {
+			if output != "" {
+				output += ", "
+			}
+			output += fmt.Sprintf("n%d : ERROR(%v)", nodeID, err)
+		}
+	}
+
+	fmt.Printf("Output: %s\n\n", output)
+}
+
+// printDBAllNodes implements PrintDB - query all 9 nodes in parallel
+func (m *ClientManager) printDBAllNodes() {
+	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PrintDB - All 9 Nodes                                ║\n")
+	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+
+	type nodeDB struct {
+		nodeID    int32
+		clusterID int32
+		balances  []*pb.BalanceEntry
+		err       error
+	}
+
+	resultChan := make(chan nodeDB, 9)
+
+	// Query all 9 nodes in parallel
+	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+		go func(nid int32) {
+			client, exists := m.nodeClients[nid]
+			if !exists {
+				resultChan <- nodeDB{nodeID: nid, err: fmt.Errorf("not connected")}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			resp, err := client.PrintDB(ctx, &pb.PrintDBRequest{
+				IncludeZeroBalance: false,
+				Limit:              0,
+			})
+
+			if err != nil {
+				resultChan <- nodeDB{nodeID: nid, err: err}
+			} else {
+				resultChan <- nodeDB{
+					nodeID:    nid,
+					clusterID: resp.ClusterId,
+					balances:  resp.Balances,
+					err:       nil,
+				}
+			}
+		}(nodeID)
+	}
+
+	// Collect and display results
+	for i := 0; i < 9; i++ {
+		result := <-resultChan
+		if result.err != nil {
+			fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
+		} else {
+			fmt.Printf("\n--- Node %d (Cluster %d) ---\n", result.nodeID, result.clusterID)
+			if len(result.balances) == 0 {
+				fmt.Println("  (No modified balances)")
+			} else {
+				for _, entry := range result.balances {
+					if entry.Balance != 10 { // Only show modified items
+						fmt.Printf("  Item %d: %d\n", entry.DataItem, entry.Balance)
+					}
+				}
+			}
+		}
+	}
+	fmt.Println()
+}
+
+// printViewAllNodes implements PrintView - show NEW-VIEW messages from all nodes
+func (m *ClientManager) printViewAllNodes() {
+	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PrintView - NEW-VIEW Messages                        ║\n")
+	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+
+	// Query all 9 nodes in parallel
+	type nodeView struct {
+		nodeID int32
+		reply  *pb.PrintViewReply
+		err    error
+	}
+
+	resultChan := make(chan nodeView, 9)
+
+	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+		go func(nid int32) {
+			client, exists := m.nodeClients[nid]
+			if !exists {
+				resultChan <- nodeView{nodeID: nid, err: fmt.Errorf("not connected")}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			resp, err := client.PrintView(ctx, &pb.PrintViewRequest{
+				IncludeLog: true,
+				LogEntries: 5,
+			})
+
+			resultChan <- nodeView{nodeID: nid, reply: resp, err: err}
+		}(nodeID)
+	}
+
+	// Collect results
+	for i := 0; i < 9; i++ {
+		result := <-resultChan
+		if result.err != nil {
+			fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
+		} else if result.reply != nil {
+			fmt.Printf("Node %d: %s\n", result.nodeID, result.reply.Message)
+		}
+	}
+
+	fmt.Println("\n(See node logs for detailed NEW-VIEW message contents)")
+	fmt.Println()
+}
+
+// printReshard implements PrintReshard - trigger resharding
+func (m *ClientManager) printReshard() {
+	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PrintReshard - Triggering Shard Redistribution      ║\n")
+	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+
+	// Send to leader of cluster 1 (or any leader)
+	var leaderClient pb.PaxosNodeClient
+	var leaderID int32
+
+	for clusterID, nodeID := range m.clusterLeaders {
+		if client, exists := m.nodeClients[nodeID]; exists {
+			leaderClient = client
+			leaderID = nodeID
+			fmt.Printf("Using node %d (Cluster %d leader) for resharding\n", nodeID, clusterID)
+			break
+		}
+	}
+
+	if leaderClient == nil {
+		fmt.Println("❌ No leader available")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := leaderClient.PrintReshard(ctx, &pb.PrintReshardRequest{
+		Execute: false, // Dry run
+		MinGain: 1,
+	})
+
+	if err != nil {
+		fmt.Printf("❌ PrintReshard failed: %v\n", err)
+		return
+	}
+
+	if !resp.Success {
+		fmt.Printf("❌ PrintReshard failed: %s\n", resp.Message)
+		return
+	}
+
+	fmt.Printf("\n%s\n", resp.Message)
+	fmt.Printf("\nTriplets (item_id, from_cluster, to_cluster):\n")
+	for _, t := range resp.Triplets {
+		fmt.Printf("  (%d, c%d, c%d)\n", t.ItemId, t.FromCluster, t.ToCluster)
+	}
+	fmt.Printf("\n(Check node %d logs for detailed analysis)\n\n", leaderID)
+}
+
+// flushAllNodes implements Flush - reset all node state
+func (m *ClientManager) flushAllNodes() {
+	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  Flushing System State - All Nodes                    ║\n")
+	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+	fmt.Println("Resetting all nodes to initial state...")
+
+	type flushResult struct {
+		nodeID int32
+		err    error
+	}
+
+	resultChan := make(chan flushResult, 9)
+
+	// Flush all 9 nodes in parallel
+	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+		go func(nid int32) {
+			client, exists := m.nodeClients[nid]
+			if !exists {
+				resultChan <- flushResult{nodeID: nid, err: fmt.Errorf("not connected")}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			resp, err := client.FlushState(ctx, &pb.FlushStateRequest{
+				ResetDatabase: true,
+				ResetLogs:     true,
+				ResetBallot:   true,
+			})
+
+			if err != nil {
+				resultChan <- flushResult{nodeID: nid, err: err}
+			} else if !resp.Success {
+				resultChan <- flushResult{nodeID: nid, err: fmt.Errorf(resp.Message)}
+			} else {
+				resultChan <- flushResult{nodeID: nid, err: nil}
+			}
+		}(nodeID)
+	}
+
+	// Collect results
+	successCount := 0
+	for i := 0; i < 9; i++ {
+		result := <-resultChan
+		if result.err != nil {
+			fmt.Printf("  Node %d: ❌ Error: %v\n", result.nodeID, result.err)
+		} else {
+			fmt.Printf("  Node %d: ✅ Flushed\n", result.nodeID)
+			successCount++
+		}
+	}
+
+	fmt.Printf("\n✅ Flush complete: %d/9 nodes reset\n", successCount)
+
+	// Reset client-side tracking
+	m.mu.Lock()
+	m.pendingQueue = make([]utils.Command, 0)
+	// Reset cluster leaders to initial state
+	for clusterID := range m.config.Clusters {
+		nodes := m.config.GetNodesInCluster(clusterID)
+		if len(nodes) > 0 {
+			m.clusterLeaders[int32(clusterID)] = int32(nodes[0])
+		}
+	}
+	m.mu.Unlock()
+
+	fmt.Println("Waiting for nodes to stabilize...")
+	time.Sleep(2 * time.Second)
+	fmt.Println()
+}
+
+// performanceAllNodes gets performance metrics from all nodes
+func (m *ClientManager) performanceAllNodes() {
+	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  Performance Metrics - All Nodes                      ║\n")
+	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+
+	type perfResult struct {
+		nodeID int32
+		reply  *pb.GetPerformanceReply
+		err    error
+	}
+
+	resultChan := make(chan perfResult, 9)
+
+	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+		go func(nid int32) {
+			client, exists := m.nodeClients[nid]
+			if !exists {
+				resultChan <- perfResult{nodeID: nid, err: fmt.Errorf("not connected")}
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			resp, err := client.GetPerformance(ctx, &pb.GetPerformanceRequest{
+				ResetCounters: false,
+			})
+
+			resultChan <- perfResult{nodeID: nid, reply: resp, err: err}
+		}(nodeID)
+	}
+
+	// Collect and display results
+	for i := 0; i < 9; i++ {
+		result := <-resultChan
+		if result.err != nil {
+			fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
+		} else if result.reply != nil {
+			r := result.reply
+			fmt.Printf("\n--- Node %d (Cluster %d) ---\n", r.NodeId, r.ClusterId)
+			fmt.Printf("  Total Transactions: %d (Success: %d, Failed: %d)\n",
+				r.TotalTransactions, r.SuccessfulTransactions, r.FailedTransactions)
+			fmt.Printf("  2PC: Coordinator=%d, Participant=%d, Commits=%d, Aborts=%d\n",
+				r.TwopcCoordinator, r.TwopcParticipant, r.TwopcCommits, r.TwopcAborts)
+			fmt.Printf("  Elections: Started=%d, Won=%d\n",
+				r.ElectionsStarted, r.ElectionsWon)
+			fmt.Printf("  Locks: Acquired=%d, Timeout=%d\n",
+				r.LocksAcquired, r.LocksTimeout)
+			fmt.Printf("  Avg Latency: Txn=%.2fms, 2PC=%.2fms\n",
+				r.AvgTransactionTimeMs, r.Avg_2PcTimeMs)
+			fmt.Printf("  Uptime: %d seconds\n", r.UptimeSeconds)
+		}
+	}
 	fmt.Println()
 }

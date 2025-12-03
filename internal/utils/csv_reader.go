@@ -9,16 +9,22 @@ import (
 )
 
 type Transaction struct {
-	Sender   string
-	Receiver string
-	Amount   int32
+	Sender     int32 // Data item ID (1-9000)
+	Receiver   int32 // Data item ID (1-9000)
+	Amount     int32
+	IsReadOnly bool // True for balance queries (s)
+}
+
+type Command struct {
+	Type        string // "transaction", "balance", "fail", "recover"
+	Transaction *Transaction
+	NodeID      int32 // For F(ni) and R(ni)
 }
 
 type TestSet struct {
-	SetNumber      int
-	Transactions   []Transaction
-	ActiveNodes    []int32
-	LeaderFailures []int // Indices where LF should occur (after which transaction)
+	SetNumber   int
+	Commands    []Command // Changed from Transactions to Commands
+	ActiveNodes []int32
 }
 
 func ReadTestFile(filename string) ([]TestSet, error) {
@@ -75,8 +81,8 @@ func ReadTestFile(filename string) ([]TestSet, error) {
 		if setNumStr != "" {
 			// Save previous set if exists
 			if currentSet != nil {
-				fmt.Printf("  -> Saving previous set %d with %d transactions\n",
-					currentSet.SetNumber, len(currentSet.Transactions))
+				fmt.Printf("  -> Saving previous set %d with %d commands\n",
+					currentSet.SetNumber, len(currentSet.Commands))
 				testSets = append(testSets, *currentSet)
 			}
 
@@ -88,10 +94,9 @@ func ReadTestFile(filename string) ([]TestSet, error) {
 			}
 
 			currentSet = &TestSet{
-				SetNumber:      setNum,
-				Transactions:   []Transaction{},
-				ActiveNodes:    parseNodes(nodesStr),
-				LeaderFailures: []int{},
+				SetNumber:   setNum,
+				Commands:    []Command{},
+				ActiveNodes: parseNodes(nodesStr),
 			}
 			fmt.Printf("  -> Started new set %d\n", setNum)
 		}
@@ -102,35 +107,40 @@ func ReadTestFile(filename string) ([]TestSet, error) {
 			continue
 		}
 
-		// Parse transaction or LF
-		if txnStr == "LF" {
-			// LF occurs AFTER the current number of transactions
-			currentSet.LeaderFailures = append(currentSet.LeaderFailures, len(currentSet.Transactions))
-			fmt.Printf("  -> Added LF at index %d\n", len(currentSet.Transactions))
-			continue
-		}
-
 		if txnStr == "" {
-			fmt.Printf("  -> Empty transaction, skipping\n")
+			fmt.Printf("  -> Empty command, skipping\n")
 			continue
 		}
 
-		// Parse transaction: (A, B, 5)
-		txn, err := parseTransaction(txnStr)
+		// Parse command: transaction, balance query, F(ni), or R(ni)
+		cmd, err := parseCommand(txnStr)
 		if err != nil {
-			fmt.Printf("  -> Failed to parse transaction '%s': %v\n", txnStr, err)
+			fmt.Printf("  -> Failed to parse command '%s': %v\n", txnStr, err)
 			continue
 		}
 
-		currentSet.Transactions = append(currentSet.Transactions, txn)
-		fmt.Printf("  -> Added transaction: %s -> %s: %d (total: %d)\n",
-			txn.Sender, txn.Receiver, txn.Amount, len(currentSet.Transactions))
+		currentSet.Commands = append(currentSet.Commands, cmd)
+		
+		switch cmd.Type {
+		case "transaction":
+			fmt.Printf("  -> Added transaction: %d -> %d: %d (total: %d)\n",
+				cmd.Transaction.Sender, cmd.Transaction.Receiver, cmd.Transaction.Amount, len(currentSet.Commands))
+		case "balance":
+			fmt.Printf("  -> Added balance query: %d (total: %d)\n",
+				cmd.Transaction.Sender, len(currentSet.Commands))
+		case "fail":
+			fmt.Printf("  -> Added F(n%d) - fail node %d (total: %d)\n",
+				cmd.NodeID, cmd.NodeID, len(currentSet.Commands))
+		case "recover":
+			fmt.Printf("  -> Added R(n%d) - recover node %d (total: %d)\n",
+				cmd.NodeID, cmd.NodeID, len(currentSet.Commands))
+		}
 	}
 
 	// Add the last set
 	if currentSet != nil {
-		fmt.Printf("Saving final set %d with %d transactions\n",
-			currentSet.SetNumber, len(currentSet.Transactions))
+		fmt.Printf("Saving final set %d with %d commands\n",
+			currentSet.SetNumber, len(currentSet.Commands))
 		testSets = append(testSets, *currentSet)
 	}
 
@@ -143,16 +153,85 @@ func ReadTestFile(filename string) ([]TestSet, error) {
 	// CRITICAL DEBUG: Print summary
 	fmt.Println("\n========== FINAL TEST SETS SUMMARY ==========")
 	for _, ts := range testSets {
-		fmt.Printf("Set %d: %d transactions, nodes=%v\n",
-			ts.SetNumber, len(ts.Transactions), ts.ActiveNodes)
+		fmt.Printf("Set %d: %d commands, nodes=%v\n",
+			ts.SetNumber, len(ts.Commands), ts.ActiveNodes)
 	}
 	fmt.Println("=============================================")
 
 	return testSets, nil
 }
 
+// parseCommand parses a command which can be:
+// - Transaction: (100, 200, 5)
+// - Balance query: (100)
+// - Fail node: F(n3)
+// - Recover node: R(n3)
+func parseCommand(s string) (Command, error) {
+	s = strings.TrimSpace(s)
+
+	// Check for F(ni) - fail node
+	if strings.HasPrefix(s, "F(") && strings.HasSuffix(s, ")") {
+		nodeStr := s[2 : len(s)-1] // Extract "ni" or "n3"
+		nodeStr = strings.TrimSpace(nodeStr)
+		
+		// Remove 'n' prefix
+		if len(nodeStr) > 1 && nodeStr[0] == 'n' {
+			nodeStr = nodeStr[1:]
+		}
+		
+		nodeID, err := strconv.Atoi(nodeStr)
+		if err != nil {
+			return Command{}, fmt.Errorf("invalid node ID in F(%s): %v", nodeStr, err)
+		}
+		
+		return Command{
+			Type:   "fail",
+			NodeID: int32(nodeID),
+		}, nil
+	}
+
+	// Check for R(ni) - recover node
+	if strings.HasPrefix(s, "R(") && strings.HasSuffix(s, ")") {
+		nodeStr := s[2 : len(s)-1]
+		nodeStr = strings.TrimSpace(nodeStr)
+		
+		// Remove 'n' prefix
+		if len(nodeStr) > 1 && nodeStr[0] == 'n' {
+			nodeStr = nodeStr[1:]
+		}
+		
+		nodeID, err := strconv.Atoi(nodeStr)
+		if err != nil {
+			return Command{}, fmt.Errorf("invalid node ID in R(%s): %v", nodeStr, err)
+		}
+		
+		return Command{
+			Type:   "recover",
+			NodeID: int32(nodeID),
+		}, nil
+	}
+
+	// Parse transaction or balance query
+	txn, err := parseTransaction(s)
+	if err != nil {
+		return Command{}, err
+	}
+
+	if txn.IsReadOnly {
+		return Command{
+			Type:        "balance",
+			Transaction: &txn,
+		}, nil
+	}
+
+	return Command{
+		Type:        "transaction",
+		Transaction: &txn,
+	}, nil
+}
+
 func parseTransaction(s string) (Transaction, error) {
-	// Remove parentheses and spaces: "(A, B, 5)" -> "A,B,5"
+	// Remove parentheses and spaces: "(100, 200, 5)" -> "100,200,5"
 	s = strings.Trim(s, "()")
 	s = strings.TrimSpace(s)
 
@@ -162,23 +241,54 @@ func parseTransaction(s string) (Transaction, error) {
 
 	parts := strings.Split(s, ",")
 
-	if len(parts) != 3 {
-		return Transaction{}, fmt.Errorf("invalid format (expected 3 parts): %s", s)
+	// Check if it's a balance query (single item)
+	if len(parts) == 1 {
+		itemStr := strings.TrimSpace(parts[0])
+		itemID, err := strconv.Atoi(itemStr)
+		if err != nil {
+			return Transaction{}, fmt.Errorf("invalid item ID '%s': %v", itemStr, err)
+		}
+
+		return Transaction{
+			Sender:     int32(itemID),
+			Receiver:   0,
+			Amount:     0,
+			IsReadOnly: true,
+		}, nil
 	}
 
-	sender := strings.TrimSpace(parts[0])
-	receiver := strings.TrimSpace(parts[1])
+	// Full transaction (3 parts)
+	if len(parts) != 3 {
+		return Transaction{}, fmt.Errorf("invalid format (expected 1 or 3 parts): %s", s)
+	}
+
+	senderStr := strings.TrimSpace(parts[0])
+	receiverStr := strings.TrimSpace(parts[1])
 	amountStr := strings.TrimSpace(parts[2])
 
+	// Parse sender as int32 data item ID
+	sender, err := strconv.Atoi(senderStr)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("invalid sender ID '%s': %v", senderStr, err)
+	}
+
+	// Parse receiver as int32 data item ID
+	receiver, err := strconv.Atoi(receiverStr)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("invalid receiver ID '%s': %v", receiverStr, err)
+	}
+
+	// Parse amount
 	amount, err := strconv.Atoi(amountStr)
 	if err != nil {
 		return Transaction{}, fmt.Errorf("invalid amount '%s': %v", amountStr, err)
 	}
 
 	return Transaction{
-		Sender:   sender,
-		Receiver: receiver,
-		Amount:   int32(amount),
+		Sender:     int32(sender),
+		Receiver:   int32(receiver),
+		Amount:     int32(amount),
+		IsReadOnly: false,
 	}, nil
 }
 
@@ -218,18 +328,19 @@ func PrintTestSets(sets []TestSet) {
 	for _, set := range sets {
 		fmt.Printf("\n=== Test Set %d ===\n", set.SetNumber)
 		fmt.Printf("Active Nodes: %v\n", set.ActiveNodes)
-		fmt.Printf("Transactions: %d\n", len(set.Transactions))
-		if len(set.LeaderFailures) > 0 {
-			fmt.Printf("Leader Failures at indices: %v\n", set.LeaderFailures)
-		}
-		for i, txn := range set.Transactions {
-			fmt.Printf("  %d. (%s, %s, %d)", i+1, txn.Sender, txn.Receiver, txn.Amount)
-			for _, lfIdx := range set.LeaderFailures {
-				if lfIdx == i {
-					fmt.Print(" <-- LEADER FAILURE AFTER THIS")
-				}
+		fmt.Printf("Commands: %d\n", len(set.Commands))
+		for i, cmd := range set.Commands {
+			switch cmd.Type {
+			case "transaction":
+				fmt.Printf("  %d. Transaction: (%d, %d, %d)\n",
+					i+1, cmd.Transaction.Sender, cmd.Transaction.Receiver, cmd.Transaction.Amount)
+			case "balance":
+				fmt.Printf("  %d. Balance query: (%d)\n", i+1, cmd.Transaction.Sender)
+			case "fail":
+				fmt.Printf("  %d. F(n%d) - Fail node %d\n", i+1, cmd.NodeID, cmd.NodeID)
+			case "recover":
+				fmt.Printf("  %d. R(n%d) - Recover node %d\n", i+1, cmd.NodeID, cmd.NodeID)
 			}
-			fmt.Println()
 		}
 	}
 }

@@ -78,7 +78,7 @@ func NewClientSingleNode(id string, nodeAddress string) (*Client, error) {
 }
 
 // SendTransaction sends a transaction with retry and broadcast mechanism
-func (c *Client) SendTransaction(sender, receiver string, amount int32) error {
+func (c *Client) SendTransaction(sender, receiver int32, amount int32) error {
 	c.timestamp++
 
 	req := &pb.TransactionRequest{
@@ -147,13 +147,13 @@ func (c *Client) sendToNode(nodeID int32, req *pb.TransactionRequest) (*pb.Trans
 }
 
 // logResult logs the transaction result
-func (c *Client) logResult(sender, receiver string, amount int32, resp *pb.TransactionReply) {
+func (c *Client) logResult(sender, receiver int32, amount int32, resp *pb.TransactionReply) {
 	resultSymbol := "✅"
 	if !resp.Success {
 		resultSymbol = "❌"
 	}
 
-	log.Printf("Client %s: %s Transaction (%s->%s:%d) - %s - %s",
+	log.Printf("Client %s: %s Transaction (%d->%d:%d) - %s - %s",
 		c.id, resultSymbol, sender, receiver, amount, resp.Result, resp.Message)
 }
 

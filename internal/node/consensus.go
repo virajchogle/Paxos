@@ -125,8 +125,48 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 			n.mu.RUnlock()
 
 			if nowLeader {
-				// We became leader during the wait
+				// We became leader during the wait - check if cross-shard
 				log.Printf("Node %d: Became leader, processing transaction", n.id)
+
+				// Check if this is a cross-shard transaction (Phase 6: 2PC)
+				tx := req.Transaction
+				senderCluster := n.config.GetClusterForDataItem(tx.Sender)
+				receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+
+				log.Printf("Node %d: 🔍 DEBUG - Transaction %d→%d: senderCluster=%d, receiverCluster=%d, crossShard=%v",
+					n.id, tx.Sender, tx.Receiver, senderCluster, receiverCluster, senderCluster != receiverCluster)
+
+				// ONLY the sender cluster initiates 2PC!
+				if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {
+					// Cross-shard transaction AND we're the sender cluster - use 2PC
+					log.Printf("Node %d: 🌐 Cross-shard transaction detected (%d in cluster %d → %d in cluster %d) - initiating 2PC as COORDINATOR",
+						n.id, tx.Sender, senderCluster, tx.Receiver, receiverCluster)
+
+					success, err := n.TwoPCCoordinator(tx, req.ClientId, req.Timestamp)
+					if err != nil {
+						return &pb.TransactionReply{
+							Success: false,
+							Message: fmt.Sprintf("2PC failed: %v", err),
+							Result:  pb.ResultType_FAILED,
+						}, nil
+					}
+
+					if success {
+						return &pb.TransactionReply{
+							Success: true,
+							Message: "Cross-shard transaction committed via 2PC",
+							Result:  pb.ResultType_SUCCESS,
+						}, nil
+					} else {
+						return &pb.TransactionReply{
+							Success: false,
+							Message: "Cross-shard transaction aborted",
+							Result:  pb.ResultType_FAILED,
+						}, nil
+					}
+				}
+
+				// Intra-shard: use normal Paxos
 				return n.processAsLeader(req)
 			} else if currentLeaderID > 0 && currentLeaderID != n.id {
 				// A leader was elected, forward to them
@@ -152,8 +192,90 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 		return nil, fmt.Errorf("no leader available yet")
 	}
 
-	// leader: process request
+	// leader: check if this is a cross-shard transaction (Phase 6: 2PC)
+	tx := req.Transaction
+	senderCluster := n.config.GetClusterForDataItem(tx.Sender)
+	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+
+	// ONLY the sender cluster initiates 2PC!
+	// The receiver cluster processes it as a normal transaction via Paxos
+	if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {
+		// Cross-shard transaction AND we're the sender cluster - use 2PC
+		log.Printf("Node %d: 🌐 Cross-shard transaction detected (%d in cluster %d → %d in cluster %d) - initiating 2PC as SENDER",
+			n.id, tx.Sender, senderCluster, tx.Receiver, receiverCluster)
+
+		success, err := n.TwoPCCoordinator(tx, req.ClientId, req.Timestamp)
+		if err != nil {
+			return &pb.TransactionReply{
+				Success: false,
+				Message: fmt.Sprintf("2PC failed: %v", err),
+				Result:  pb.ResultType_FAILED,
+			}, nil
+		}
+
+		if success {
+			return &pb.TransactionReply{
+				Success: true,
+				Message: "Cross-shard transaction committed via 2PC",
+				Result:  pb.ResultType_SUCCESS,
+			}, nil
+		} else {
+			return &pb.TransactionReply{
+				Success: false,
+				Message: "Cross-shard transaction aborted",
+				Result:  pb.ResultType_FAILED,
+			}, nil
+		}
+	}
+
+	// Intra-shard OR we're the receiver cluster: process with normal Paxos
+	// executeTransaction will handle the cross-shard logic (debit or credit based on ownership)
+	log.Printf("Node %d: Processing transaction %d→%d via normal Paxos (cluster %d)",
+		n.id, tx.Sender, tx.Receiver, n.clusterID)
 	return n.processAsLeader(req)
+}
+
+// ============================================================================
+// PHASE 3: READ-ONLY TRANSACTIONS (Balance Queries)
+// ============================================================================
+
+// QueryBalance handles read-only balance queries
+// No Paxos consensus needed - just read from local replica
+// No locking needed - read-only operation
+func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*pb.BalanceQueryReply, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	dataItemID := req.DataItemId
+
+	// Check if this node's cluster owns this data item
+	cluster := int32(n.config.GetClusterForDataItem(dataItemID))
+	if cluster != n.clusterID {
+		return &pb.BalanceQueryReply{
+			Success:   false,
+			Balance:   0,
+			Message:   fmt.Sprintf("Data item %d not in this cluster (cluster %d owns items in different range)", dataItemID, n.clusterID),
+			NodeId:    n.id,
+			ClusterId: n.clusterID,
+		}, nil
+	}
+
+	// Read balance from local replica (no consensus needed)
+	balance, exists := n.balances[dataItemID]
+	if !exists {
+		// Item exists in this cluster's range but hasn't been modified yet
+		balance = n.config.Data.InitialBalance
+	}
+
+	log.Printf("Node %d: 📖 Balance query for item %d = %d", n.id, dataItemID, balance)
+
+	return &pb.BalanceQueryReply{
+		Success:   true,
+		Balance:   balance,
+		Message:   "Balance query successful",
+		NodeId:    n.id,
+		ClusterId: n.clusterID,
+	}, nil
 }
 
 // processAsLeader runs Phase 2 (send accept; collect accepted; commit; execute)
@@ -349,7 +471,7 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 	// Store in log (skip seq=0 which is used for heartbeats)
 	if req.SequenceNumber > 0 {
 		log.Printf("Node %d: Received ACCEPT seq=%d, ballot=%s", n.id, req.SequenceNumber, reqBallot.String())
-		
+
 		ent := types.NewLogEntry(reqBallot, req.SequenceNumber, req.Request, req.IsNoop)
 		ent.Status = "A"
 		if existing, ok := n.log[req.SequenceNumber]; ok {
@@ -361,7 +483,7 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 		} else {
 			n.log[req.SequenceNumber] = ent
 		}
-		
+
 		log.Printf("Node %d: ✓ ACCEPTED seq=%d", n.id, req.SequenceNumber)
 	}
 	n.mu.Unlock()
@@ -378,18 +500,23 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 	// Check if node is active
 	n.mu.RLock()
 	active := n.isActive
+	isLeader := n.isLeader
+	lastExec := n.lastExecuted
 	n.mu.RUnlock()
 
 	if !active {
+		log.Printf("Node %d: ⚠️  COMMIT REJECTED - node is inactive", n.id)
 		return &pb.CommitReply{Success: false}, nil
 	}
 
 	// Log and apply commit (skip seq=0 heartbeats)
 	if req.SequenceNumber > 0 {
 		if !req.IsNoop {
-			log.Printf("Node %d: Received COMMIT seq=%d", n.id, req.SequenceNumber)
+			log.Printf("Node %d: 📬 RECEIVED COMMIT seq=%d (isLeader=%v, lastExecuted=%d)",
+				n.id, req.SequenceNumber, isLeader, lastExec)
 		}
-		n.commitAndExecute(req.SequenceNumber)
+		result := n.commitAndExecute(req.SequenceNumber)
+		log.Printf("Node %d: 🔄 COMMIT seq=%d executed with result=%v", n.id, req.SequenceNumber, result)
 	}
 
 	// Check if leader should create checkpoint
@@ -403,50 +530,72 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	n.mu.Lock()
 	// ensure entry exists
 	entry, ok := n.log[seq]
+	lastExec := n.lastExecuted
+
+	log.Printf("Node %d: 🔍 commitAndExecute seq=%d: entry_exists=%v, lastExecuted=%d", n.id, seq, ok, lastExec)
+
 	if !ok {
 		// We received a COMMIT for a sequence we don't have in our log
 		// This means we missed the ACCEPT message (possibly while inactive)
-		lastExec := n.lastExecuted
 		n.mu.Unlock()
 
 		if seq > lastExec+1 {
-			log.Printf("Node %d: Missing log entry for seq %d (lastExecuted=%d) - will be filled by NEW-VIEW", n.id, seq, lastExec)
+			log.Printf("Node %d: ❌ Missing log entry for seq %d (lastExecuted=%d) - will be filled by NEW-VIEW", n.id, seq, lastExec)
 			// Don't trigger recovery here to avoid infinite loops
 			// The NEW-VIEW protocol will handle this
+		} else {
+			log.Printf("Node %d: ❌ Missing log entry for seq %d but it's next in line (lastExecuted=%d)", n.id, seq, lastExec)
 		}
 		return pb.ResultType_FAILED
 	}
+
 	// mark committed
+	oldStatus := entry.Status
 	entry.Status = "C"
+	log.Printf("Node %d: ✅ Marked seq=%d as COMMITTED (was %s)", n.id, seq, oldStatus)
 	n.mu.Unlock()
 
 	// execute all committed entries sequentially from lastExecuted+1
 	var finalResult pb.ResultType = pb.ResultType_SUCCESS
 	n.mu.RLock()
-	lastExec := n.lastExecuted
+	lastExec = n.lastExecuted
 	n.mu.RUnlock()
+
+	log.Printf("Node %d: 🏃 Starting execution loop from seq=%d to reach seq=%d", n.id, lastExec+1, seq)
 
 	for {
 		nextSeq := lastExec + 1
 		n.mu.RLock()
 		comm, exists := n.log[nextSeq]
+		status := ""
+		if exists {
+			status = comm.Status
+		}
 		n.mu.RUnlock()
+
+		log.Printf("Node %d: 🔄 Checking seq=%d: exists=%v, status=%s", n.id, nextSeq, exists, status)
 
 		// Only execute if entry exists and is committed or executed
 		if !exists || (comm.Status != "C" && comm.Status != "E") {
 			// No more consecutive committed sequences
 			if nextSeq <= seq {
-				log.Printf("Node %d: Gap at seq %d prevents execution (trying to reach seq %d) - waiting for NEW-VIEW", n.id, nextSeq, seq)
+				log.Printf("Node %d: ⚠️  Gap at seq %d prevents execution (exists=%v, status=%s) - target seq %d",
+					n.id, nextSeq, exists, status, seq)
 			}
 			break
 		}
 
+		log.Printf("Node %d: ▶️  Executing seq=%d", n.id, nextSeq)
 		res := n.executeTransaction(nextSeq, comm)
+		log.Printf("Node %d: ✅ Executed seq=%d with result=%v", n.id, nextSeq, res)
+
 		if nextSeq == seq {
 			finalResult = res
 		}
 		lastExec = nextSeq
 	}
+
+	log.Printf("Node %d: 🏁 Execution loop finished at seq=%d (target was %d), result=%v", n.id, lastExec, seq, finalResult)
 	return finalResult
 }
 
@@ -454,13 +603,16 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	log.Printf("Node %d: 🎬 executeTransaction START seq=%d, lastExecuted=%d", n.id, seq, n.lastExecuted)
+
 	if entry.Status == "E" {
+		log.Printf("Node %d: executeTransaction seq=%d already executed, skipping", n.id, seq)
 		return pb.ResultType_SUCCESS
 	}
 
 	// ensure sequential execution
 	if seq != n.lastExecuted+1 {
-		log.Printf("Node %d: Cannot execute seq %d, last executed %d", n.id, seq, n.lastExecuted)
+		log.Printf("Node %d: ❌ Cannot execute seq %d, last executed %d (sequence gap!)", n.id, seq, n.lastExecuted)
 		return pb.ResultType_FAILED
 	}
 
@@ -472,17 +624,155 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	}
 
 	tx := entry.Request.Transaction
-	sender := tx.Sender
-	recv := tx.Receiver
+	sender := tx.Sender // Now int32 data item ID
+	recv := tx.Receiver // Now int32 data item ID
 	amt := tx.Amount
+	clientID := entry.Request.ClientId
+	timestamp := entry.Request.Timestamp
+
+	log.Printf("Node %d: 🔍 executeTransaction seq=%d: %d→%d:%d", n.id, seq, sender, recv, amt)
+
+	// Determine which cluster owns which items
+	senderCluster := n.config.GetClusterForDataItem(sender)
+	receiverCluster := n.config.GetClusterForDataItem(recv)
+	isCrossShard := senderCluster != receiverCluster
+
+	// For cross-shard transactions executed via 2PC, only process the items we own
+	ownsSender := int32(senderCluster) == n.clusterID
+	ownsReceiver := int32(receiverCluster) == n.clusterID
+
+	if isCrossShard {
+		// This is a cross-shard transaction - only process our part
+		log.Printf("Node %d: 🔍 Cross-shard detected seq=%d: sender=%d(C%d), recv=%d(C%d), ourCluster=%d, ownsSender=%v, ownsRecv=%v",
+			n.id, seq, sender, senderCluster, recv, receiverCluster, n.clusterID, ownsSender, ownsReceiver)
+
+		if !ownsSender && !ownsReceiver {
+			// We don't own either item - skip execution
+			log.Printf("Node %d: Skipping cross-shard transaction seq %d (neither item in our cluster %d)",
+				n.id, seq, n.clusterID)
+			entry.Status = "E"
+			n.lastExecuted = seq
+			return pb.ResultType_SUCCESS
+		}
+
+		// Determine which items to lock and process
+		var itemsToProcess []int32
+		if ownsSender {
+			itemsToProcess = []int32{sender}
+		} else {
+			itemsToProcess = []int32{recv}
+		}
+
+		// Phase 2: Acquire locks only on items we own
+		n.mu.Unlock()
+		acquired, lockedItems := n.acquireLocks(itemsToProcess, clientID, timestamp)
+		n.mu.Lock()
+
+		if !acquired {
+			log.Printf("Node %d: ⚠️  Failed to acquire locks for seq %d (items %v), marking as FAILED",
+				n.id, seq, itemsToProcess)
+			entry.Status = "E"
+			n.lastExecuted = seq
+			return pb.ResultType_FAILED
+		}
+
+		// Ensure locks are released after execution
+		defer func() {
+			n.mu.Unlock()
+			n.releaseLocks(lockedItems, clientID, timestamp)
+			n.mu.Lock()
+		}()
+
+		// Check balance only if we're processing the sender
+		if ownsSender {
+			if n.balances[sender] < amt {
+				log.Printf("Node %d: INSUFFICIENT BALANCE for item %d (has %d needs %d)",
+					n.id, sender, n.balances[sender], amt)
+				entry.Status = "E"
+				n.lastExecuted = seq
+				return pb.ResultType_INSUFFICIENT_BALANCE
+			}
+		}
+
+		// Apply only our part of the transaction
+		if ownsSender {
+			// Debit from sender
+			senderOldBalance := n.balances[sender]
+			n.balances[sender] -= amt
+			log.Printf("Node %d: ✅ EXECUTED seq=%d (2PC-DEBIT): item %d: %d→%d (owns sender, cluster %d)",
+				n.id, seq, sender, senderOldBalance, n.balances[sender], n.clusterID)
+		} else if ownsReceiver {
+			// Credit to receiver
+			recvOldBalance := n.balances[recv]
+			n.balances[recv] += amt
+			log.Printf("Node %d: ✅ EXECUTED seq=%d (2PC-CREDIT): item %d: %d→%d (owns receiver, cluster %d)",
+				n.id, seq, recv, recvOldBalance, n.balances[recv], n.clusterID)
+		} else {
+			log.Printf("Node %d: ⚠️  UNEXPECTED: Cross-shard but don't own sender or receiver!", n.id)
+		}
+
+		entry.Status = "E"
+		n.lastExecuted = seq
+
+		// Save database state
+		n.mu.Unlock()
+		if err := n.saveDatabase(); err != nil {
+			log.Printf("Node %d: ⚠️  Warning - failed to save database: %v", n.id, err)
+		}
+		n.mu.Lock()
+
+		// Record access pattern (after releasing lock to avoid deadlock)
+		n.mu.Unlock()
+		n.RecordTransactionAccess(sender, recv, isCrossShard)
+		n.mu.Lock()
+
+		return pb.ResultType_SUCCESS
+	}
+
+	// Regular intra-shard transaction - process both items as before
+	// Phase 2: Acquire locks on both sender and receiver before executing
+	// Temporarily release main mutex to acquire locks (avoid holding multiple locks)
+	n.mu.Unlock()
+	items := []int32{sender, recv}
+	acquired, lockedItems := n.acquireLocks(items, clientID, timestamp)
+	n.mu.Lock()
+
+	if !acquired {
+		log.Printf("Node %d: ⚠️  Failed to acquire locks for seq %d (items %v), marking as FAILED",
+			n.id, seq, items)
+		entry.Status = "E" // Mark as executed but failed
+		n.lastExecuted = seq
+		return pb.ResultType_FAILED
+	}
+
+	// Ensure locks are released after execution
+	defer func() {
+		n.mu.Unlock()
+		n.releaseLocks(lockedItems, clientID, timestamp)
+		n.mu.Lock()
+	}()
 
 	// check balance
 	if n.balances[sender] < amt {
-		log.Printf("Node %d: INSUFFICIENT BALANCE for %s (has %d needs %d)", n.id, sender, n.balances[sender], amt)
+		log.Printf("Node %d: INSUFFICIENT BALANCE for item %d (has %d needs %d)", n.id, sender, n.balances[sender], amt)
 		entry.Status = "E"
 		n.lastExecuted = seq
 		return pb.ResultType_INSUFFICIENT_BALANCE
 	}
+
+	// Phase 5: Create WAL entry before applying changes (for future 2PC rollback)
+	txnID := fmt.Sprintf("txn-%s-%d", clientID, timestamp)
+	n.createWALEntry(txnID, seq)
+
+	// Record old values in WAL before modifying
+	senderOldBalance := n.balances[sender]
+	recvOldBalance := n.balances[recv]
+
+	// Write operations to WAL
+	n.mu.Unlock() // Release main lock while writing to WAL
+	n.writeToWAL(txnID, types.OpTypeDebit, sender, senderOldBalance, senderOldBalance-amt)
+	n.writeToWAL(txnID, types.OpTypeCredit, recv, recvOldBalance, recvOldBalance+amt)
+	n.mu.Lock() // Re-acquire main lock
 
 	// apply
 	n.balances[sender] -= amt
@@ -490,8 +780,21 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	entry.Status = "E"
 	n.lastExecuted = seq
 
-	log.Printf("Node %d: ✅ EXECUTED seq=%d: %s->%s:%d (new: %s=%d, %s=%d)",
+	log.Printf("Node %d: ✅ EXECUTED seq=%d: %d->%d:%d (new: %d=%d, %d=%d) [locked+WAL]",
 		n.id, seq, sender, recv, amt, sender, n.balances[sender], recv, n.balances[recv])
+
+	// Phase 9: Record transaction access pattern for redistribution analysis
+	senderClusterForAccess := n.config.GetClusterForDataItem(sender)
+	recvClusterForAccess := n.config.GetClusterForDataItem(recv)
+	isCrossClusterForAccess := senderClusterForAccess != recvClusterForAccess
+	n.RecordTransactionAccess(sender, recv, isCrossClusterForAccess)
+
+	// Commit WAL entry (transaction successful)
+	n.mu.Unlock()
+	if err := n.commitWAL(txnID); err != nil {
+		log.Printf("Node %d: ⚠️  Warning - failed to commit WAL: %v", n.id, err)
+	}
+	n.mu.Lock()
 
 	// Save database state to disk (must release lock first to avoid holding it during I/O)
 	n.mu.Unlock()
@@ -527,15 +830,42 @@ func (n *Node) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Status
 	}, nil
 }
 
-func (n *Node) PrintDB() {
+func (n *Node) DebugPrintDB() {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	fmt.Printf("\n╔════════════════════════════════╗\n")
-	fmt.Printf("║   Node %d - Database State    ║\n", n.id)
-	fmt.Printf("╚════════════════════════════════╝\n")
-	for _, clientID := range n.config.Clients.ClientIDs {
-		if bal, ok := n.balances[clientID]; ok {
-			fmt.Printf("  %s: %d\n", clientID, bal)
+
+	// Collect modified items (those that don't have initial balance)
+	modifiedItems := make(map[int32]int32)
+	initialBalance := n.config.Data.InitialBalance
+	for itemID, balance := range n.balances {
+		if balance != initialBalance {
+			modifiedItems[itemID] = balance
+		}
+	}
+
+	fmt.Printf("\n╔════════════════════════════════════════╗\n")
+	fmt.Printf("║   Node %d (Cluster %d) - Database     ║\n", n.id, n.clusterID)
+	fmt.Printf("╚════════════════════════════════════════╝\n")
+
+	if len(modifiedItems) == 0 {
+		fmt.Printf("  No modified items (all at initial balance %d)\n", initialBalance)
+	} else {
+		fmt.Printf("  Modified items:\n")
+		// Print in sorted order for consistency
+		itemIDs := make([]int32, 0, len(modifiedItems))
+		for itemID := range modifiedItems {
+			itemIDs = append(itemIDs, itemID)
+		}
+		// Simple sort
+		for i := 0; i < len(itemIDs); i++ {
+			for j := i + 1; j < len(itemIDs); j++ {
+				if itemIDs[i] > itemIDs[j] {
+					itemIDs[i], itemIDs[j] = itemIDs[j], itemIDs[i]
+				}
+			}
+		}
+		for _, itemID := range itemIDs {
+			fmt.Printf("  Item %d: %d\n", itemID, modifiedItems[itemID])
 		}
 	}
 	fmt.Println()
@@ -583,7 +913,7 @@ func (n *Node) PrintStatus(seq int32) {
 	fmt.Println()
 }
 
-func (n *Node) PrintView() {
+func (n *Node) DebugPrintView() {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")

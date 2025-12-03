@@ -39,12 +39,12 @@ func (sw *syncWriter) Write(p []byte) (n int, err error) {
 }
 
 func main() {
-	nodeID := flag.Int("id", 1, "Node ID (1-5)")
+	nodeID := flag.Int("id", 1, "Node ID (1-9)")
 	configFile := flag.String("config", "config/nodes.yaml", "Config file")
 	flag.Parse()
 
-	if *nodeID < 1 || *nodeID > 5 {
-		log.Fatal("Node ID must be between 1 and 5")
+	if *nodeID < 1 || *nodeID > 9 {
+		log.Fatal("Node ID must be between 1 and 9")
 	}
 
 	// Set up file logging for this node with immediate flushing
@@ -124,7 +124,7 @@ func runInteractiveCLI(n *node.Node) {
 
 		switch parts[0] {
 		case "printDB":
-			n.PrintDB()
+			n.DebugPrintDB()
 
 		case "printLog":
 			n.PrintLog()
@@ -142,7 +142,7 @@ func runInteractiveCLI(n *node.Node) {
 			n.PrintStatus(int32(seqNum))
 
 		case "printView":
-			n.PrintView()
+			n.DebugPrintView()
 
 		case "status":
 			n.ShowStatus()

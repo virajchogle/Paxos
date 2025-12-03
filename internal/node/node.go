@@ -15,9 +15,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"paxos-banking/internal/config"
+	"paxos-banking/internal/redistribution"
 	"paxos-banking/internal/types"
 	pb "paxos-banking/proto"
 )
+
+// Lock represents a lock on a data item
+type Lock struct {
+	clientID  string
+	timestamp int64
+	lockedAt  time.Time
+}
 
 type Node struct {
 	pb.UnimplementedPaxosNodeServer
@@ -25,9 +33,10 @@ type Node struct {
 	mu sync.RWMutex
 
 	// Identity
-	id      int32
-	address string
-	config  *config.Config
+	id        int32
+	clusterID int32
+	address   string
+	config    *config.Config
 
 	// Paxos state
 	isLeader       bool
@@ -47,13 +56,27 @@ type Node struct {
 	clientLastReply map[string]*pb.TransactionReply
 	clientLastTS    map[string]int64
 
-	// Database
-	balances map[string]int32
+	// Database - changed from client IDs to data item IDs
+	balances map[int32]int32 // dataItemID -> balance
+
+	// Locking mechanism (Phase 2)
+	lockMu      sync.Mutex      // Separate mutex for lock operations
+	locks       map[int32]*Lock // dataItemID -> Lock
+	lockTimeout time.Duration   // How long to wait for a lock
+
+	// Write-Ahead Log (Phase 5) - for 2PC rollback
+	walMu   sync.RWMutex               // Separate mutex for WAL operations
+	wal     map[string]*types.WALEntry // transactionID -> WALEntry
+	walFile string                     // Path to WAL file for persistence
 
 	// Communication
 	grpcServer  *grpc.Server
-	peerClients map[int32]pb.PaxosNodeClient
+	peerClients map[int32]pb.PaxosNodeClient // Peers within same cluster
 	peerConns   map[int32]*grpc.ClientConn
+
+	// Cross-cluster communication (for 2PC)
+	allClusterClients map[int32]pb.PaxosNodeClient // All nodes across all clusters
+	allClusterConns   map[int32]*grpc.ClientConn
 
 	// Timers
 	timerMu           sync.Mutex
@@ -73,18 +96,47 @@ type Node struct {
 
 	// 🎯 System Initialization
 	systemInitialized bool
+
+	// 📊 Phase 7: Performance Counters
+	perfMu                 sync.RWMutex
+	totalTransactions      int64
+	successfulTransactions int64
+	failedTransactions     int64
+	twoPCCoordinator       int64
+	twoPCParticipant       int64
+	twoPCCommits           int64
+	twoPCAborts            int64
+	electionsStarted       int64
+	electionsWon           int64
+	proposalsMade          int64
+	proposalsAccepted      int64
+	locksAcquired          int64
+	locksTimeout           int64
+	totalTransactionTimeMs int64
+	totalTransactionCount  int64
+	total2PCTimeMs         int64
+	total2PCCount          int64
+	startTime              time.Time
+
+	// 🔄 Phase 9: Shard Redistribution
+	accessTracker  *redistribution.AccessTracker
+	migrationState *MigrationState
 }
 
 func NewNode(id int32, cfg *config.Config) (*Node, error) {
 	// jittered timeout - use milliseconds for leader election
-	// Increased to prevent election storms
+	// OPTIMIZED FOR HIGH THROUGHPUT (5000+ TPS target)
 	rand.Seed(time.Now().UnixNano() + int64(id))
-	baseTimeout := 500 * time.Millisecond
-	jitter := time.Duration(rand.Intn(200)) * time.Millisecond // 0-200ms
+	baseTimeout := 100 * time.Millisecond                     // Was 500ms - now 100ms for performance
+	jitter := time.Duration(rand.Intn(50)) * time.Millisecond // 0-50ms (was 0-200ms)
 	timerDuration := baseTimeout + jitter
+
+	// Get cluster ID for this node
+	clusterID := int32(cfg.GetClusterForNode(int(id)))
 
 	n := &Node{
 		id:                id,
+		clusterID:         clusterID,
 		address:           cfg.GetNodeAddress(int(id)),
 		config:            cfg,
 		isLeader:          false,
@@ -97,35 +149,45 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		newViewLog:        make([]*pb.NewViewRequest, 0),
 		clientLastReply:   make(map[string]*pb.TransactionReply),
 		clientLastTS:      make(map[string]int64),
-		balances:          make(map[string]int32),
+		balances:          make(map[int32]int32),                   // Changed to int32 -> int32
+		locks:             make(map[int32]*Lock),                   // Initialize lock table
+		lockTimeout:       100 * time.Millisecond,                  // Was 2s - now 100ms for performance
+		wal:               make(map[string]*types.WALEntry),        // Initialize WAL (Phase 5)
+		walFile:           fmt.Sprintf("data/node%d_wal.json", id), // WAL persistence file
 		peerClients:       make(map[int32]pb.PaxosNodeClient),
 		peerConns:         make(map[int32]*grpc.ClientConn),
+		allClusterClients: make(map[int32]pb.PaxosNodeClient),
+		allClusterConns:   make(map[int32]*grpc.ClientConn),
 		timerDuration:     timerDuration,
 		dbFilePath:        fmt.Sprintf("data/node%d_db.json", id),
-		prepareCooldown:   time.Duration(50+rand.Intn(50)) * time.Millisecond, // 50-100ms
-		heartbeatInterval: 50 * time.Millisecond,                              // Fast heartbeats
+		prepareCooldown:   time.Duration(5+rand.Intn(10)) * time.Millisecond, // Was 50-100ms - now 5-15ms for performance
+		heartbeatInterval: 10 * time.Millisecond,                             // Was 50ms - now 10ms for performance
 		heartbeatStop:     nil,
 		stopChan:          make(chan struct{}),
 		isActive:          true,
 		systemInitialized: false,
+		startTime:         time.Now(),                              // Phase 7: Track uptime
+		accessTracker:     redistribution.NewAccessTracker(100000), // Phase 9: Access pattern tracking
+		migrationState:    nil,                                     // Phase 9: Initialized on first migration
 	}
 
-	// Initialize database with fresh balances from config (resets on every start, like logs)
-	log.Printf("Node %d: 🔄 Initializing fresh database from config", id)
-	for _, clientID := range cfg.Clients.ClientIDs {
-		n.balances[clientID] = cfg.Clients.InitialBalance
+	// Initialize database with data items in this node's shard
+	log.Printf("Node %d (Cluster %d): 🔄 Initializing fresh database for shard", id, clusterID)
+	cluster := cfg.Clusters[int(clusterID)]
+	for itemID := cluster.ShardStart; itemID <= cluster.ShardEnd; itemID++ {
+		n.balances[itemID] = cfg.Data.InitialBalance
 	}
 
 	// Save initial state to disk
 	if err := n.saveDatabase(); err != nil {
 		log.Printf("Node %d: ⚠️  Warning - failed to save initial database: %v", id, err)
 	} else {
-		log.Printf("Node %d: 💾 Initialized %s with balance %d for each client",
-			id, n.dbFilePath, cfg.Clients.InitialBalance)
+		log.Printf("Node %d (Cluster %d): 💾 Initialized %d data items (range %d-%d) with balance %d",
+			id, clusterID, len(n.balances), cluster.ShardStart, cluster.ShardEnd, cfg.Data.InitialBalance)
 	}
 
-	log.Printf("Node %d: Timer set to %v (base: 500ms + jitter: %v)",
-		id, timerDuration, jitter)
+	log.Printf("Node %d (Cluster %d): Timer set to %v (base: 500ms + jitter: %v)",
+		id, clusterID, timerDuration, jitter)
 
 	return n, nil
 }
@@ -171,32 +233,110 @@ func (n *Node) connectToPeers() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	totalNodes := len(n.config.Nodes)
-	if totalNodes == 0 {
-		return fmt.Errorf("no nodes in config")
-	}
+	// Connect to peers within the same cluster
+	clusterNodes := n.config.GetNodesInCluster(int(n.clusterID))
+	peersInCluster := 0
 
-	for nodeID := range n.config.Nodes {
-		nid := int32(nodeID)
+	for _, nid := range clusterNodes {
 		if nid == n.id {
 			continue
 		}
-		addr := n.config.GetNodeAddress(nodeID)
+		addr := n.config.GetNodeAddress(int(nid))
 		// dial with short timeout
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 		cancel()
 		if err != nil {
-			log.Printf("Node %d: Warning - couldn't connect to node %d (%s): %v", n.id, nid, addr, err)
+			log.Printf("Node %d (Cluster %d): Warning - couldn't connect to peer node %d (%s): %v", n.id, n.clusterID, nid, addr, err)
 			continue
 		}
 		n.peerConns[nid] = conn
 		n.peerClients[nid] = pb.NewPaxosNodeClient(conn)
-		log.Printf("Node %d: Connected to node %d (%s)", n.id, nid, addr)
+		log.Printf("Node %d (Cluster %d): Connected to peer node %d (%s)", n.id, n.clusterID, nid, addr)
+		peersInCluster++
 	}
 
-	log.Printf("Node %d: Started with %d peer connections (configured cluster size: %d)", n.id, len(n.peerClients), totalNodes)
+	// Also connect to ALL nodes across all clusters for cross-cluster communication (2PC)
+	// Note: We'll use lazy connection establishment - connect on first use with retry
+	totalCrossCluster := 0
+	for nodeID := range n.config.Nodes {
+		nid := int32(nodeID)
+		if nid == n.id {
+			// Add self-reference for 2PC (when coordinator is also a participant)
+			// Use a special marker that will route to local handlers
+			continue
+		}
+		// Skip if already connected as peer
+		if _, exists := n.peerClients[nid]; exists {
+			n.allClusterClients[nid] = n.peerClients[nid]
+			n.allClusterConns[nid] = n.peerConns[nid]
+			totalCrossCluster++
+			continue
+		}
+
+		addr := n.config.GetNodeAddress(nodeID)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second) // Increased from 500ms
+		conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancel()
+		if err != nil {
+			log.Printf("Node %d (Cluster %d): Warning - couldn't connect to cross-cluster node %d (%s): %v (will retry on-demand)", n.id, n.clusterID, nid, addr, err)
+			// Don't fail - will retry later when needed
+			continue
+		}
+		n.allClusterConns[nid] = conn
+		n.allClusterClients[nid] = pb.NewPaxosNodeClient(conn)
+		totalCrossCluster++
+	}
+
+	log.Printf("Node %d (Cluster %d): Connected to %d peers in cluster, %d cross-cluster nodes",
+		n.id, n.clusterID, peersInCluster, totalCrossCluster)
 	return nil
+}
+
+// getCrossClusterClient gets a client for cross-cluster communication with retry
+// Returns the client or nil if unable to connect after retries
+func (n *Node) getCrossClusterClient(nodeID int32) (pb.PaxosNodeClient, error) {
+	// Check if it's a request to self
+	if nodeID == n.id {
+		// Return a special marker - caller will handle local dispatch
+		return nil, fmt.Errorf("self-reference: use local handler")
+	}
+
+	n.mu.RLock()
+	client, exists := n.allClusterClients[nodeID]
+	n.mu.RUnlock()
+
+	if exists {
+		return client, nil
+	}
+
+	// Client doesn't exist - try to establish connection
+	log.Printf("Node %d: Attempting to establish cross-cluster connection to node %d", n.id, nodeID)
+
+	addr := n.config.GetNodeAddress(int(nodeID))
+	if addr == "" {
+		return nil, fmt.Errorf("no address found for node %d", nodeID)
+	}
+
+	// Try to connect with reasonable timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to node %d at %s: %v", nodeID, addr, err)
+	}
+
+	client = pb.NewPaxosNodeClient(conn)
+
+	// Save the connection for future use
+	n.mu.Lock()
+	n.allClusterConns[nodeID] = conn
+	n.allClusterClients[nodeID] = client
+	n.mu.Unlock()
+
+	log.Printf("Node %d: ✅ Established cross-cluster connection to node %d", n.id, nodeID)
+	return client, nil
 }
 
 func (n *Node) Stop() {
@@ -235,13 +375,14 @@ func (n *Node) Stop() {
 }
 
 func (n *Node) quorumSize() int {
-	// quorum is floor(N/2) + 1 where N is configured cluster size
+	// quorum is floor(N/2) + 1 where N is the cluster size (not total nodes)
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	total := len(n.config.Nodes)
+	clusterNodes := n.config.GetNodesInCluster(int(n.clusterID))
+	total := len(clusterNodes)
 	if total <= 0 {
 		// safe default
-		return 3
+		return 2
 	}
 	return (total / 2) + 1
 }
@@ -372,13 +513,13 @@ func (n *Node) retryPeerConnections() {
 				return
 			}
 
-			// Find nodes we should be connected to but aren't
+			// Find cluster peers we should be connected to but aren't
 			missingPeers := []struct {
 				id   int32
 				addr string
 			}{}
-			for nodeID := range n.config.Nodes {
-				nid := int32(nodeID)
+			clusterNodes := n.config.GetNodesInCluster(int(n.clusterID))
+			for _, nid := range clusterNodes {
 				if nid == n.id {
 					continue
 				}
@@ -386,7 +527,7 @@ func (n *Node) retryPeerConnections() {
 					missingPeers = append(missingPeers, struct {
 						id   int32
 						addr string
-					}{id: nid, addr: n.config.GetNodeAddress(nodeID)})
+					}{id: nid, addr: n.config.GetNodeAddress(int(nid))})
 				}
 			}
 			n.mu.Unlock()
@@ -401,8 +542,10 @@ func (n *Node) retryPeerConnections() {
 					n.mu.Lock()
 					n.peerConns[peer.id] = conn
 					n.peerClients[peer.id] = pb.NewPaxosNodeClient(conn)
+					n.allClusterClients[peer.id] = n.peerClients[peer.id]
+					n.allClusterConns[peer.id] = n.peerConns[peer.id]
 					n.mu.Unlock()
-					log.Printf("Node %d: Connected to node %d (%s)", n.id, peer.id, peer.addr)
+					log.Printf("Node %d (Cluster %d): Reconnected to peer node %d (%s)", n.id, n.clusterID, peer.id, peer.addr)
 				}
 			}
 
@@ -415,7 +558,7 @@ func (n *Node) retryPeerConnections() {
 // saveDatabase persists the current balance state to a JSON file
 func (n *Node) saveDatabase() error {
 	n.mu.RLock()
-	balancesCopy := make(map[string]int32, len(n.balances))
+	balancesCopy := make(map[int32]int32, len(n.balances))
 	for k, v := range n.balances {
 		balancesCopy[k] = v
 	}
@@ -519,7 +662,7 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		statusResp, err := peerClient.GetStatus(ctx, &pb.StatusRequest{NodeId: peerID})
 		cancel()
-		
+
 		if err == nil && statusResp.NextSequenceNumber-1 > maxSeqCluster {
 			maxSeqCluster = statusResp.NextSequenceNumber - 1
 			log.Printf("Node %d: Peer %d has advanced to seq %d", n.id, peerID, maxSeqCluster)
@@ -586,4 +729,237 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 	}
 
 	log.Printf("Node %d: Finished requesting missing sequences, will retry on next check if gaps remain", n.id)
+}
+
+// ============================================================================
+// LOCKING MECHANISM (Phase 2)
+// ============================================================================
+
+// acquireLock attempts to acquire a lock on a data item
+// Returns true if lock is acquired, false otherwise
+func (n *Node) acquireLock(dataItemID int32, clientID string, timestamp int64) bool {
+	n.lockMu.Lock()
+	defer n.lockMu.Unlock()
+
+	// Check if lock exists
+	if lock, exists := n.locks[dataItemID]; exists {
+		// Check if lock is held by same client (re-entrant)
+		if lock.clientID == clientID && lock.timestamp == timestamp {
+			// Same client, same transaction - allow
+			return true
+		}
+
+		// Check if lock has timed out
+		if time.Since(lock.lockedAt) > n.lockTimeout {
+			log.Printf("Node %d: Lock on item %d expired (held by %s), granting to %s",
+				n.id, dataItemID, lock.clientID, clientID)
+			// Lock expired, can grant to new client
+			n.locks[dataItemID] = &Lock{
+				clientID:  clientID,
+				timestamp: timestamp,
+				lockedAt:  time.Now(),
+			}
+			return true
+		}
+
+		// Lock is held by someone else and hasn't timed out
+		log.Printf("Node %d: Lock on item %d DENIED - held by %s (age: %v)",
+			n.id, dataItemID, lock.clientID, time.Since(lock.lockedAt))
+		return false
+	}
+
+	// No lock exists, grant it
+	n.locks[dataItemID] = &Lock{
+		clientID:  clientID,
+		timestamp: timestamp,
+		lockedAt:  time.Now(),
+	}
+	log.Printf("Node %d: Lock on item %d GRANTED to %s", n.id, dataItemID, clientID)
+	return true
+}
+
+// releaseLock releases a lock on a data item
+func (n *Node) releaseLock(dataItemID int32, clientID string, timestamp int64) {
+	n.lockMu.Lock()
+	defer n.lockMu.Unlock()
+
+	// Check if lock exists
+	if lock, exists := n.locks[dataItemID]; exists {
+		// Only release if held by this client
+		if lock.clientID == clientID && lock.timestamp == timestamp {
+			delete(n.locks, dataItemID)
+			log.Printf("Node %d: Lock on item %d RELEASED by %s", n.id, dataItemID, clientID)
+		} else {
+			log.Printf("Node %d: Lock release DENIED - item %d not held by %s (held by %s)",
+				n.id, dataItemID, clientID, lock.clientID)
+		}
+	}
+}
+
+// acquireLocks acquires locks on multiple data items in sorted order (deadlock prevention)
+// Returns true if all locks acquired, false otherwise
+// If false, also returns list of items that were locked (need to be released)
+func (n *Node) acquireLocks(items []int32, clientID string, timestamp int64) (bool, []int32) {
+	// Sort items to prevent deadlocks (always acquire in same order)
+	sortedItems := make([]int32, len(items))
+	copy(sortedItems, items)
+
+	// Simple bubble sort for small arrays
+	for i := 0; i < len(sortedItems); i++ {
+		for j := i + 1; j < len(sortedItems); j++ {
+			if sortedItems[i] > sortedItems[j] {
+				sortedItems[i], sortedItems[j] = sortedItems[j], sortedItems[i]
+			}
+		}
+	}
+
+	// Remove duplicates
+	uniqueItems := make([]int32, 0, len(sortedItems))
+	seen := make(map[int32]bool)
+	for _, item := range sortedItems {
+		if !seen[item] {
+			uniqueItems = append(uniqueItems, item)
+			seen[item] = true
+		}
+	}
+
+	// Try to acquire all locks
+	acquired := make([]int32, 0, len(uniqueItems))
+	for _, item := range uniqueItems {
+		if n.acquireLock(item, clientID, timestamp) {
+			acquired = append(acquired, item)
+		} else {
+			// Failed to acquire this lock, release all previously acquired locks
+			log.Printf("Node %d: Failed to acquire lock on item %d, releasing %d locks",
+				n.id, item, len(acquired))
+			for _, relItem := range acquired {
+				n.releaseLock(relItem, clientID, timestamp)
+			}
+			return false, acquired
+		}
+	}
+
+	log.Printf("Node %d: Successfully acquired %d locks for %s", n.id, len(acquired), clientID)
+	return true, acquired
+}
+
+// releaseLocks releases locks on multiple data items
+func (n *Node) releaseLocks(items []int32, clientID string, timestamp int64) {
+	for _, item := range items {
+		n.releaseLock(item, clientID, timestamp)
+	}
+}
+
+// ============================================================================
+// FLUSH STATE - Reset node state between test sets
+// ============================================================================
+
+// FlushState resets the node state to initial conditions
+func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.FlushStateReply, error) {
+	log.Printf("Node %d: 🔄 FlushState requested (db=%v, logs=%v, ballot=%v)",
+		n.id, req.ResetDatabase, req.ResetLogs, req.ResetBallot)
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// Reset database to initial state
+	if req.ResetDatabase {
+		cluster := n.config.Clusters[int(n.clusterID)]
+		n.balances = make(map[int32]int32)
+		for itemID := cluster.ShardStart; itemID <= cluster.ShardEnd; itemID++ {
+			n.balances[int32(itemID)] = n.config.Data.InitialBalance
+		}
+		log.Printf("Node %d: Database reset to initial state (%d items with balance %d)",
+			n.id, len(n.balances), n.config.Data.InitialBalance)
+
+		// Save to disk
+		n.mu.Unlock()
+		if err := n.saveDatabase(); err != nil {
+			log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
+		}
+		n.mu.Lock()
+	}
+
+	// Reset Paxos logs
+	if req.ResetLogs {
+		n.log = make(map[int32]*types.LogEntry)
+		n.newViewLog = make([]*pb.NewViewRequest, 0)
+		n.clientLastReply = make(map[string]*pb.TransactionReply)
+		n.clientLastTS = make(map[string]int64)
+		n.nextSeqNum = 1
+		n.lastExecuted = 0
+		log.Printf("Node %d: Paxos logs cleared", n.id)
+	}
+
+	// Reset ballot and leader state
+	if req.ResetBallot {
+		n.currentBallot = types.NewBallot(0, n.id)
+		n.promisedBallot = types.NewBallot(0, 0)
+		n.isLeader = false
+		n.leaderID = -1
+		n.systemInitialized = false
+		log.Printf("Node %d: Ballot and leader state reset", n.id)
+	}
+
+	// Clear locks
+	n.lockMu.Lock()
+	n.locks = make(map[int32]*Lock)
+	n.lockMu.Unlock()
+
+	// Clear WAL
+	n.walMu.Lock()
+	n.wal = make(map[string]*types.WALEntry)
+	n.walMu.Unlock()
+
+	// Reset access tracker
+	if n.accessTracker != nil {
+		n.accessTracker.Reset()
+	}
+
+	// Reset performance counters
+	n.perfMu.Lock()
+	n.totalTransactions = 0
+	n.successfulTransactions = 0
+	n.failedTransactions = 0
+	n.twoPCCoordinator = 0
+	n.twoPCParticipant = 0
+	n.twoPCCommits = 0
+	n.twoPCAborts = 0
+	n.electionsStarted = 0
+	n.electionsWon = 0
+	n.proposalsMade = 0
+	n.proposalsAccepted = 0
+	n.locksAcquired = 0
+	n.locksTimeout = 0
+	n.totalTransactionTimeMs = 0
+	n.totalTransactionCount = 0
+	n.total2PCTimeMs = 0
+	n.total2PCCount = 0
+	n.startTime = time.Now()
+	n.perfMu.Unlock()
+
+	log.Printf("Node %d: ✅ State flushed successfully", n.id)
+
+	// Reset leader timeout timer to prevent race conditions during election
+	if n.leaderTimer != nil {
+		n.leaderTimer.Stop()
+		// Give longer timeout after FLUSH to allow clean election
+		n.leaderTimer = time.NewTimer(2 * time.Second)
+	}
+
+	// Trigger leader election after flush to ensure system is ready
+	// Only trigger if this is the expected leader for the cluster
+	expectedLeader := n.config.GetLeaderNodeForCluster(int(n.clusterID))
+	if expectedLeader == n.id {
+		log.Printf("Node %d: Triggering leader election after flush (expected leader for cluster %d)", n.id, n.clusterID)
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Brief delay
+			n.StartLeaderElection()
+		}()
+	}
+
+	return &pb.FlushStateReply{
+		Success: true,
+		Message: fmt.Sprintf("Node %d state flushed", n.id),
+	}, nil
 }
