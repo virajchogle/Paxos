@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.10
 // 	protoc        v6.33.1
-// source: proto/paxos.proto
+// source: paxos.proto
 
 package proto
 
@@ -55,11 +55,11 @@ func (x ResultType) String() string {
 }
 
 func (ResultType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_paxos_proto_enumTypes[0].Descriptor()
+	return file_paxos_proto_enumTypes[0].Descriptor()
 }
 
 func (ResultType) Type() protoreflect.EnumType {
-	return &file_proto_paxos_proto_enumTypes[0]
+	return &file_paxos_proto_enumTypes[0]
 }
 
 func (x ResultType) Number() protoreflect.EnumNumber {
@@ -68,7 +68,7 @@ func (x ResultType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ResultType.Descriptor instead.
 func (ResultType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{0}
+	return file_paxos_proto_rawDescGZIP(), []int{0}
 }
 
 // Ballot number
@@ -82,7 +82,7 @@ type Ballot struct {
 
 func (x *Ballot) Reset() {
 	*x = Ballot{}
-	mi := &file_proto_paxos_proto_msgTypes[0]
+	mi := &file_paxos_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -94,7 +94,7 @@ func (x *Ballot) String() string {
 func (*Ballot) ProtoMessage() {}
 
 func (x *Ballot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[0]
+	mi := &file_paxos_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -107,7 +107,7 @@ func (x *Ballot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ballot.ProtoReflect.Descriptor instead.
 func (*Ballot) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{0}
+	return file_paxos_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Ballot) GetNumber() int32 {
@@ -136,7 +136,7 @@ type Transaction struct {
 
 func (x *Transaction) Reset() {
 	*x = Transaction{}
-	mi := &file_proto_paxos_proto_msgTypes[1]
+	mi := &file_paxos_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -148,7 +148,7 @@ func (x *Transaction) String() string {
 func (*Transaction) ProtoMessage() {}
 
 func (x *Transaction) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[1]
+	mi := &file_paxos_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -161,7 +161,7 @@ func (x *Transaction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Transaction.ProtoReflect.Descriptor instead.
 func (*Transaction) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{1}
+	return file_paxos_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Transaction) GetSender() int32 {
@@ -197,7 +197,7 @@ type TransactionRequest struct {
 
 func (x *TransactionRequest) Reset() {
 	*x = TransactionRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[2]
+	mi := &file_paxos_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -209,7 +209,7 @@ func (x *TransactionRequest) String() string {
 func (*TransactionRequest) ProtoMessage() {}
 
 func (x *TransactionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[2]
+	mi := &file_paxos_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -222,7 +222,7 @@ func (x *TransactionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransactionRequest.ProtoReflect.Descriptor instead.
 func (*TransactionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{2}
+	return file_paxos_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *TransactionRequest) GetClientId() string {
@@ -259,7 +259,7 @@ type TransactionReply struct {
 
 func (x *TransactionReply) Reset() {
 	*x = TransactionReply{}
-	mi := &file_proto_paxos_proto_msgTypes[3]
+	mi := &file_paxos_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -271,7 +271,7 @@ func (x *TransactionReply) String() string {
 func (*TransactionReply) ProtoMessage() {}
 
 func (x *TransactionReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[3]
+	mi := &file_paxos_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -284,7 +284,7 @@ func (x *TransactionReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransactionReply.ProtoReflect.Descriptor instead.
 func (*TransactionReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{3}
+	return file_paxos_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *TransactionReply) GetSuccess() bool {
@@ -325,7 +325,7 @@ type BalanceQueryRequest struct {
 
 func (x *BalanceQueryRequest) Reset() {
 	*x = BalanceQueryRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[4]
+	mi := &file_paxos_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -337,7 +337,7 @@ func (x *BalanceQueryRequest) String() string {
 func (*BalanceQueryRequest) ProtoMessage() {}
 
 func (x *BalanceQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[4]
+	mi := &file_paxos_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -350,7 +350,7 @@ func (x *BalanceQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BalanceQueryRequest.ProtoReflect.Descriptor instead.
 func (*BalanceQueryRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{4}
+	return file_paxos_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *BalanceQueryRequest) GetDataItemId() int32 {
@@ -373,7 +373,7 @@ type BalanceQueryReply struct {
 
 func (x *BalanceQueryReply) Reset() {
 	*x = BalanceQueryReply{}
-	mi := &file_proto_paxos_proto_msgTypes[5]
+	mi := &file_paxos_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -385,7 +385,7 @@ func (x *BalanceQueryReply) String() string {
 func (*BalanceQueryReply) ProtoMessage() {}
 
 func (x *BalanceQueryReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[5]
+	mi := &file_paxos_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -398,7 +398,7 @@ func (x *BalanceQueryReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BalanceQueryReply.ProtoReflect.Descriptor instead.
 func (*BalanceQueryReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{5}
+	return file_paxos_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *BalanceQueryReply) GetSuccess() bool {
@@ -447,7 +447,7 @@ type PrepareRequest struct {
 
 func (x *PrepareRequest) Reset() {
 	*x = PrepareRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[6]
+	mi := &file_paxos_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -459,7 +459,7 @@ func (x *PrepareRequest) String() string {
 func (*PrepareRequest) ProtoMessage() {}
 
 func (x *PrepareRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[6]
+	mi := &file_paxos_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -472,7 +472,7 @@ func (x *PrepareRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareRequest.ProtoReflect.Descriptor instead.
 func (*PrepareRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{6}
+	return file_paxos_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PrepareRequest) GetBallot() *Ballot {
@@ -501,7 +501,7 @@ type AcceptedEntry struct {
 
 func (x *AcceptedEntry) Reset() {
 	*x = AcceptedEntry{}
-	mi := &file_proto_paxos_proto_msgTypes[7]
+	mi := &file_paxos_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -513,7 +513,7 @@ func (x *AcceptedEntry) String() string {
 func (*AcceptedEntry) ProtoMessage() {}
 
 func (x *AcceptedEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[7]
+	mi := &file_paxos_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -526,7 +526,7 @@ func (x *AcceptedEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptedEntry.ProtoReflect.Descriptor instead.
 func (*AcceptedEntry) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{7}
+	return file_paxos_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *AcceptedEntry) GetBallot() *Ballot {
@@ -570,7 +570,7 @@ type PromiseReply struct {
 
 func (x *PromiseReply) Reset() {
 	*x = PromiseReply{}
-	mi := &file_proto_paxos_proto_msgTypes[8]
+	mi := &file_paxos_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -582,7 +582,7 @@ func (x *PromiseReply) String() string {
 func (*PromiseReply) ProtoMessage() {}
 
 func (x *PromiseReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[8]
+	mi := &file_paxos_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -595,7 +595,7 @@ func (x *PromiseReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromiseReply.ProtoReflect.Descriptor instead.
 func (*PromiseReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{8}
+	return file_paxos_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PromiseReply) GetSuccess() bool {
@@ -646,7 +646,7 @@ type AcceptRequest struct {
 
 func (x *AcceptRequest) Reset() {
 	*x = AcceptRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[9]
+	mi := &file_paxos_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -658,7 +658,7 @@ func (x *AcceptRequest) String() string {
 func (*AcceptRequest) ProtoMessage() {}
 
 func (x *AcceptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[9]
+	mi := &file_paxos_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -671,7 +671,7 @@ func (x *AcceptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptRequest.ProtoReflect.Descriptor instead.
 func (*AcceptRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{9}
+	return file_paxos_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *AcceptRequest) GetBallot() *Ballot {
@@ -714,7 +714,7 @@ type AcceptedReply struct {
 
 func (x *AcceptedReply) Reset() {
 	*x = AcceptedReply{}
-	mi := &file_proto_paxos_proto_msgTypes[10]
+	mi := &file_paxos_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +726,7 @@ func (x *AcceptedReply) String() string {
 func (*AcceptedReply) ProtoMessage() {}
 
 func (x *AcceptedReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[10]
+	mi := &file_paxos_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +739,7 @@ func (x *AcceptedReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptedReply.ProtoReflect.Descriptor instead.
 func (*AcceptedReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{10}
+	return file_paxos_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AcceptedReply) GetSuccess() bool {
@@ -783,7 +783,7 @@ type CommitRequest struct {
 
 func (x *CommitRequest) Reset() {
 	*x = CommitRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[11]
+	mi := &file_paxos_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -795,7 +795,7 @@ func (x *CommitRequest) String() string {
 func (*CommitRequest) ProtoMessage() {}
 
 func (x *CommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[11]
+	mi := &file_paxos_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -808,7 +808,7 @@ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
 func (*CommitRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{11}
+	return file_paxos_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CommitRequest) GetBallot() *Ballot {
@@ -848,7 +848,7 @@ type CommitReply struct {
 
 func (x *CommitReply) Reset() {
 	*x = CommitReply{}
-	mi := &file_proto_paxos_proto_msgTypes[12]
+	mi := &file_paxos_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -860,7 +860,7 @@ func (x *CommitReply) String() string {
 func (*CommitReply) ProtoMessage() {}
 
 func (x *CommitReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[12]
+	mi := &file_paxos_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -873,7 +873,7 @@ func (x *CommitReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitReply.ProtoReflect.Descriptor instead.
 func (*CommitReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{12}
+	return file_paxos_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CommitReply) GetSuccess() bool {
@@ -895,7 +895,7 @@ type NewViewRequest struct {
 
 func (x *NewViewRequest) Reset() {
 	*x = NewViewRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[13]
+	mi := &file_paxos_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -907,7 +907,7 @@ func (x *NewViewRequest) String() string {
 func (*NewViewRequest) ProtoMessage() {}
 
 func (x *NewViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[13]
+	mi := &file_paxos_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -920,7 +920,7 @@ func (x *NewViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewViewRequest.ProtoReflect.Descriptor instead.
 func (*NewViewRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{13}
+	return file_paxos_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *NewViewRequest) GetBallot() *Ballot {
@@ -954,7 +954,7 @@ type NewViewReply struct {
 
 func (x *NewViewReply) Reset() {
 	*x = NewViewReply{}
-	mi := &file_proto_paxos_proto_msgTypes[14]
+	mi := &file_paxos_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -966,7 +966,7 @@ func (x *NewViewReply) String() string {
 func (*NewViewReply) ProtoMessage() {}
 
 func (x *NewViewReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[14]
+	mi := &file_paxos_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -979,7 +979,7 @@ func (x *NewViewReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NewViewReply.ProtoReflect.Descriptor instead.
 func (*NewViewReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{14}
+	return file_paxos_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *NewViewReply) GetSuccess() bool {
@@ -1008,7 +1008,7 @@ type CheckpointRequest struct {
 
 func (x *CheckpointRequest) Reset() {
 	*x = CheckpointRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[15]
+	mi := &file_paxos_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1020,7 +1020,7 @@ func (x *CheckpointRequest) String() string {
 func (*CheckpointRequest) ProtoMessage() {}
 
 func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[15]
+	mi := &file_paxos_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1033,7 +1033,7 @@ func (x *CheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointRequest.ProtoReflect.Descriptor instead.
 func (*CheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{15}
+	return file_paxos_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CheckpointRequest) GetSequenceNumber() int32 {
@@ -1067,7 +1067,7 @@ type CheckpointReply struct {
 
 func (x *CheckpointReply) Reset() {
 	*x = CheckpointReply{}
-	mi := &file_proto_paxos_proto_msgTypes[16]
+	mi := &file_paxos_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1079,7 +1079,7 @@ func (x *CheckpointReply) String() string {
 func (*CheckpointReply) ProtoMessage() {}
 
 func (x *CheckpointReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[16]
+	mi := &file_paxos_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1092,7 +1092,7 @@ func (x *CheckpointReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointReply.ProtoReflect.Descriptor instead.
 func (*CheckpointReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{16}
+	return file_paxos_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CheckpointReply) GetSuccess() bool {
@@ -1118,7 +1118,7 @@ type GetCheckpointRequest struct {
 
 func (x *GetCheckpointRequest) Reset() {
 	*x = GetCheckpointRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[17]
+	mi := &file_paxos_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1130,7 +1130,7 @@ func (x *GetCheckpointRequest) String() string {
 func (*GetCheckpointRequest) ProtoMessage() {}
 
 func (x *GetCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[17]
+	mi := &file_paxos_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1143,7 +1143,7 @@ func (x *GetCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*GetCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{17}
+	return file_paxos_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GetCheckpointRequest) GetNodeId() int32 {
@@ -1164,7 +1164,7 @@ type GetCheckpointReply struct {
 
 func (x *GetCheckpointReply) Reset() {
 	*x = GetCheckpointReply{}
-	mi := &file_proto_paxos_proto_msgTypes[18]
+	mi := &file_paxos_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1176,7 +1176,7 @@ func (x *GetCheckpointReply) String() string {
 func (*GetCheckpointReply) ProtoMessage() {}
 
 func (x *GetCheckpointReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[18]
+	mi := &file_paxos_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1189,7 +1189,7 @@ func (x *GetCheckpointReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCheckpointReply.ProtoReflect.Descriptor instead.
 func (*GetCheckpointReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{18}
+	return file_paxos_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GetCheckpointReply) GetSuccess() bool {
@@ -1223,7 +1223,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[19]
+	mi := &file_paxos_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1235,7 +1235,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[19]
+	mi := &file_paxos_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1248,7 +1248,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{19}
+	return file_paxos_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *StatusRequest) GetNodeId() int32 {
@@ -1272,7 +1272,7 @@ type StatusReply struct {
 
 func (x *StatusReply) Reset() {
 	*x = StatusReply{}
-	mi := &file_proto_paxos_proto_msgTypes[20]
+	mi := &file_paxos_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1284,7 +1284,7 @@ func (x *StatusReply) String() string {
 func (*StatusReply) ProtoMessage() {}
 
 func (x *StatusReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[20]
+	mi := &file_paxos_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1297,7 +1297,7 @@ func (x *StatusReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusReply.ProtoReflect.Descriptor instead.
 func (*StatusReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{20}
+	return file_paxos_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *StatusReply) GetNodeId() int32 {
@@ -1353,7 +1353,7 @@ type SetActiveRequest struct {
 
 func (x *SetActiveRequest) Reset() {
 	*x = SetActiveRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[21]
+	mi := &file_paxos_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1365,7 +1365,7 @@ func (x *SetActiveRequest) String() string {
 func (*SetActiveRequest) ProtoMessage() {}
 
 func (x *SetActiveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[21]
+	mi := &file_paxos_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1378,7 +1378,7 @@ func (x *SetActiveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetActiveRequest.ProtoReflect.Descriptor instead.
 func (*SetActiveRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{21}
+	return file_paxos_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SetActiveRequest) GetNodeId() int32 {
@@ -1406,7 +1406,7 @@ type SetActiveReply struct {
 
 func (x *SetActiveReply) Reset() {
 	*x = SetActiveReply{}
-	mi := &file_proto_paxos_proto_msgTypes[22]
+	mi := &file_paxos_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1418,7 +1418,7 @@ func (x *SetActiveReply) String() string {
 func (*SetActiveReply) ProtoMessage() {}
 
 func (x *SetActiveReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[22]
+	mi := &file_paxos_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1431,7 +1431,7 @@ func (x *SetActiveReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetActiveReply.ProtoReflect.Descriptor instead.
 func (*SetActiveReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{22}
+	return file_paxos_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SetActiveReply) GetSuccess() bool {
@@ -1466,7 +1466,7 @@ type GetLogEntryRequest struct {
 
 func (x *GetLogEntryRequest) Reset() {
 	*x = GetLogEntryRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[23]
+	mi := &file_paxos_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1478,7 +1478,7 @@ func (x *GetLogEntryRequest) String() string {
 func (*GetLogEntryRequest) ProtoMessage() {}
 
 func (x *GetLogEntryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[23]
+	mi := &file_paxos_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1491,7 +1491,7 @@ func (x *GetLogEntryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLogEntryRequest.ProtoReflect.Descriptor instead.
 func (*GetLogEntryRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{23}
+	return file_paxos_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GetLogEntryRequest) GetNodeId() int32 {
@@ -1518,7 +1518,7 @@ type GetLogEntryReply struct {
 
 func (x *GetLogEntryReply) Reset() {
 	*x = GetLogEntryReply{}
-	mi := &file_proto_paxos_proto_msgTypes[24]
+	mi := &file_paxos_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1530,7 +1530,7 @@ func (x *GetLogEntryReply) String() string {
 func (*GetLogEntryReply) ProtoMessage() {}
 
 func (x *GetLogEntryReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[24]
+	mi := &file_paxos_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1543,7 +1543,7 @@ func (x *GetLogEntryReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLogEntryReply.ProtoReflect.Descriptor instead.
 func (*GetLogEntryReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{24}
+	return file_paxos_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *GetLogEntryReply) GetSuccess() bool {
@@ -1574,7 +1574,7 @@ type TwoPCPrepareRequest struct {
 
 func (x *TwoPCPrepareRequest) Reset() {
 	*x = TwoPCPrepareRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[25]
+	mi := &file_paxos_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1586,7 +1586,7 @@ func (x *TwoPCPrepareRequest) String() string {
 func (*TwoPCPrepareRequest) ProtoMessage() {}
 
 func (x *TwoPCPrepareRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[25]
+	mi := &file_paxos_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1599,7 +1599,7 @@ func (x *TwoPCPrepareRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TwoPCPrepareRequest.ProtoReflect.Descriptor instead.
 func (*TwoPCPrepareRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{25}
+	return file_paxos_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *TwoPCPrepareRequest) GetTransactionId() string {
@@ -1649,7 +1649,7 @@ type TwoPCPrepareReply struct {
 
 func (x *TwoPCPrepareReply) Reset() {
 	*x = TwoPCPrepareReply{}
-	mi := &file_proto_paxos_proto_msgTypes[26]
+	mi := &file_paxos_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1661,7 +1661,7 @@ func (x *TwoPCPrepareReply) String() string {
 func (*TwoPCPrepareReply) ProtoMessage() {}
 
 func (x *TwoPCPrepareReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[26]
+	mi := &file_paxos_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1674,7 +1674,7 @@ func (x *TwoPCPrepareReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TwoPCPrepareReply.ProtoReflect.Descriptor instead.
 func (*TwoPCPrepareReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{26}
+	return file_paxos_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *TwoPCPrepareReply) GetSuccess() bool {
@@ -1716,7 +1716,7 @@ type TwoPCCommitRequest struct {
 
 func (x *TwoPCCommitRequest) Reset() {
 	*x = TwoPCCommitRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[27]
+	mi := &file_paxos_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1728,7 +1728,7 @@ func (x *TwoPCCommitRequest) String() string {
 func (*TwoPCCommitRequest) ProtoMessage() {}
 
 func (x *TwoPCCommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[27]
+	mi := &file_paxos_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1741,7 +1741,7 @@ func (x *TwoPCCommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TwoPCCommitRequest.ProtoReflect.Descriptor instead.
 func (*TwoPCCommitRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{27}
+	return file_paxos_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *TwoPCCommitRequest) GetTransactionId() string {
@@ -1770,7 +1770,7 @@ type TwoPCCommitReply struct {
 
 func (x *TwoPCCommitReply) Reset() {
 	*x = TwoPCCommitReply{}
-	mi := &file_proto_paxos_proto_msgTypes[28]
+	mi := &file_paxos_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1782,7 +1782,7 @@ func (x *TwoPCCommitReply) String() string {
 func (*TwoPCCommitReply) ProtoMessage() {}
 
 func (x *TwoPCCommitReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[28]
+	mi := &file_paxos_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1795,7 +1795,7 @@ func (x *TwoPCCommitReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TwoPCCommitReply.ProtoReflect.Descriptor instead.
 func (*TwoPCCommitReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{28}
+	return file_paxos_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *TwoPCCommitReply) GetSuccess() bool {
@@ -1838,7 +1838,7 @@ type TwoPCAbortRequest struct {
 
 func (x *TwoPCAbortRequest) Reset() {
 	*x = TwoPCAbortRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[29]
+	mi := &file_paxos_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1850,7 +1850,7 @@ func (x *TwoPCAbortRequest) String() string {
 func (*TwoPCAbortRequest) ProtoMessage() {}
 
 func (x *TwoPCAbortRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[29]
+	mi := &file_paxos_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1863,7 +1863,7 @@ func (x *TwoPCAbortRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TwoPCAbortRequest.ProtoReflect.Descriptor instead.
 func (*TwoPCAbortRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{29}
+	return file_paxos_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *TwoPCAbortRequest) GetTransactionId() string {
@@ -1899,7 +1899,7 @@ type TwoPCAbortReply struct {
 
 func (x *TwoPCAbortReply) Reset() {
 	*x = TwoPCAbortReply{}
-	mi := &file_proto_paxos_proto_msgTypes[30]
+	mi := &file_paxos_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1911,7 +1911,7 @@ func (x *TwoPCAbortReply) String() string {
 func (*TwoPCAbortReply) ProtoMessage() {}
 
 func (x *TwoPCAbortReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[30]
+	mi := &file_paxos_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1924,7 +1924,7 @@ func (x *TwoPCAbortReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TwoPCAbortReply.ProtoReflect.Descriptor instead.
 func (*TwoPCAbortReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{30}
+	return file_paxos_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *TwoPCAbortReply) GetSuccess() bool {
@@ -1967,7 +1967,7 @@ type PrintBalanceRequest struct {
 
 func (x *PrintBalanceRequest) Reset() {
 	*x = PrintBalanceRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[31]
+	mi := &file_paxos_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1979,7 +1979,7 @@ func (x *PrintBalanceRequest) String() string {
 func (*PrintBalanceRequest) ProtoMessage() {}
 
 func (x *PrintBalanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[31]
+	mi := &file_paxos_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1992,7 +1992,7 @@ func (x *PrintBalanceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintBalanceRequest.ProtoReflect.Descriptor instead.
 func (*PrintBalanceRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{31}
+	return file_paxos_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *PrintBalanceRequest) GetStartItem() int32 {
@@ -2026,7 +2026,7 @@ type BalanceEntry struct {
 
 func (x *BalanceEntry) Reset() {
 	*x = BalanceEntry{}
-	mi := &file_proto_paxos_proto_msgTypes[32]
+	mi := &file_paxos_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2038,7 +2038,7 @@ func (x *BalanceEntry) String() string {
 func (*BalanceEntry) ProtoMessage() {}
 
 func (x *BalanceEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[32]
+	mi := &file_paxos_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2051,7 +2051,7 @@ func (x *BalanceEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BalanceEntry.ProtoReflect.Descriptor instead.
 func (*BalanceEntry) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{32}
+	return file_paxos_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *BalanceEntry) GetDataItem() int32 {
@@ -2084,7 +2084,7 @@ type PrintBalanceReply struct {
 
 func (x *PrintBalanceReply) Reset() {
 	*x = PrintBalanceReply{}
-	mi := &file_proto_paxos_proto_msgTypes[33]
+	mi := &file_paxos_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2096,7 +2096,7 @@ func (x *PrintBalanceReply) String() string {
 func (*PrintBalanceReply) ProtoMessage() {}
 
 func (x *PrintBalanceReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[33]
+	mi := &file_paxos_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2109,7 +2109,7 @@ func (x *PrintBalanceReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintBalanceReply.ProtoReflect.Descriptor instead.
 func (*PrintBalanceReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{33}
+	return file_paxos_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PrintBalanceReply) GetSuccess() bool {
@@ -2179,7 +2179,7 @@ type PrintDBRequest struct {
 
 func (x *PrintDBRequest) Reset() {
 	*x = PrintDBRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[34]
+	mi := &file_paxos_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2191,7 +2191,7 @@ func (x *PrintDBRequest) String() string {
 func (*PrintDBRequest) ProtoMessage() {}
 
 func (x *PrintDBRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[34]
+	mi := &file_paxos_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2204,7 +2204,7 @@ func (x *PrintDBRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintDBRequest.ProtoReflect.Descriptor instead.
 func (*PrintDBRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{34}
+	return file_paxos_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *PrintDBRequest) GetIncludeZeroBalance() bool {
@@ -2237,7 +2237,7 @@ type PrintDBReply struct {
 
 func (x *PrintDBReply) Reset() {
 	*x = PrintDBReply{}
-	mi := &file_proto_paxos_proto_msgTypes[35]
+	mi := &file_paxos_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2249,7 +2249,7 @@ func (x *PrintDBReply) String() string {
 func (*PrintDBReply) ProtoMessage() {}
 
 func (x *PrintDBReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[35]
+	mi := &file_paxos_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2262,7 +2262,7 @@ func (x *PrintDBReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintDBReply.ProtoReflect.Descriptor instead.
 func (*PrintDBReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{35}
+	return file_paxos_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *PrintDBReply) GetSuccess() bool {
@@ -2332,7 +2332,7 @@ type PrintViewRequest struct {
 
 func (x *PrintViewRequest) Reset() {
 	*x = PrintViewRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[36]
+	mi := &file_paxos_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2344,7 +2344,7 @@ func (x *PrintViewRequest) String() string {
 func (*PrintViewRequest) ProtoMessage() {}
 
 func (x *PrintViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[36]
+	mi := &file_paxos_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2357,7 +2357,7 @@ func (x *PrintViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintViewRequest.ProtoReflect.Descriptor instead.
 func (*PrintViewRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{36}
+	return file_paxos_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *PrintViewRequest) GetIncludeLog() bool {
@@ -2388,7 +2388,7 @@ type LogEntrySummary struct {
 
 func (x *LogEntrySummary) Reset() {
 	*x = LogEntrySummary{}
-	mi := &file_proto_paxos_proto_msgTypes[37]
+	mi := &file_paxos_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2400,7 +2400,7 @@ func (x *LogEntrySummary) String() string {
 func (*LogEntrySummary) ProtoMessage() {}
 
 func (x *LogEntrySummary) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[37]
+	mi := &file_paxos_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2413,7 +2413,7 @@ func (x *LogEntrySummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEntrySummary.ProtoReflect.Descriptor instead.
 func (*LogEntrySummary) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{37}
+	return file_paxos_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *LogEntrySummary) GetSequence() int32 {
@@ -2478,7 +2478,7 @@ type PrintViewReply struct {
 
 func (x *PrintViewReply) Reset() {
 	*x = PrintViewReply{}
-	mi := &file_proto_paxos_proto_msgTypes[38]
+	mi := &file_paxos_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2490,7 +2490,7 @@ func (x *PrintViewReply) String() string {
 func (*PrintViewReply) ProtoMessage() {}
 
 func (x *PrintViewReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[38]
+	mi := &file_paxos_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2503,7 +2503,7 @@ func (x *PrintViewReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintViewReply.ProtoReflect.Descriptor instead.
 func (*PrintViewReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{38}
+	return file_paxos_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *PrintViewReply) GetSuccess() bool {
@@ -2600,7 +2600,7 @@ type GetPerformanceRequest struct {
 
 func (x *GetPerformanceRequest) Reset() {
 	*x = GetPerformanceRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[39]
+	mi := &file_paxos_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2612,7 +2612,7 @@ func (x *GetPerformanceRequest) String() string {
 func (*GetPerformanceRequest) ProtoMessage() {}
 
 func (x *GetPerformanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[39]
+	mi := &file_paxos_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2625,7 +2625,7 @@ func (x *GetPerformanceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPerformanceRequest.ProtoReflect.Descriptor instead.
 func (*GetPerformanceRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{39}
+	return file_paxos_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetPerformanceRequest) GetResetCounters() bool {
@@ -2669,7 +2669,7 @@ type GetPerformanceReply struct {
 
 func (x *GetPerformanceReply) Reset() {
 	*x = GetPerformanceReply{}
-	mi := &file_proto_paxos_proto_msgTypes[40]
+	mi := &file_paxos_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2681,7 +2681,7 @@ func (x *GetPerformanceReply) String() string {
 func (*GetPerformanceReply) ProtoMessage() {}
 
 func (x *GetPerformanceReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[40]
+	mi := &file_paxos_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2694,7 +2694,7 @@ func (x *GetPerformanceReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPerformanceReply.ProtoReflect.Descriptor instead.
 func (*GetPerformanceReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{40}
+	return file_paxos_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *GetPerformanceReply) GetSuccess() bool {
@@ -2850,7 +2850,7 @@ type MigrationPrepareRequest struct {
 
 func (x *MigrationPrepareRequest) Reset() {
 	*x = MigrationPrepareRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[41]
+	mi := &file_paxos_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2862,7 +2862,7 @@ func (x *MigrationPrepareRequest) String() string {
 func (*MigrationPrepareRequest) ProtoMessage() {}
 
 func (x *MigrationPrepareRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[41]
+	mi := &file_paxos_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2875,7 +2875,7 @@ func (x *MigrationPrepareRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationPrepareRequest.ProtoReflect.Descriptor instead.
 func (*MigrationPrepareRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{41}
+	return file_paxos_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *MigrationPrepareRequest) GetMigrationId() string {
@@ -2918,7 +2918,7 @@ type MigrationPrepareReply struct {
 
 func (x *MigrationPrepareReply) Reset() {
 	*x = MigrationPrepareReply{}
-	mi := &file_proto_paxos_proto_msgTypes[42]
+	mi := &file_paxos_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2930,7 +2930,7 @@ func (x *MigrationPrepareReply) String() string {
 func (*MigrationPrepareReply) ProtoMessage() {}
 
 func (x *MigrationPrepareReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[42]
+	mi := &file_paxos_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2943,7 +2943,7 @@ func (x *MigrationPrepareReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationPrepareReply.ProtoReflect.Descriptor instead.
 func (*MigrationPrepareReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{42}
+	return file_paxos_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *MigrationPrepareReply) GetSuccess() bool {
@@ -2985,7 +2985,7 @@ type MigrationGetDataRequest struct {
 
 func (x *MigrationGetDataRequest) Reset() {
 	*x = MigrationGetDataRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[43]
+	mi := &file_paxos_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2997,7 +2997,7 @@ func (x *MigrationGetDataRequest) String() string {
 func (*MigrationGetDataRequest) ProtoMessage() {}
 
 func (x *MigrationGetDataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[43]
+	mi := &file_paxos_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3010,7 +3010,7 @@ func (x *MigrationGetDataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationGetDataRequest.ProtoReflect.Descriptor instead.
 func (*MigrationGetDataRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{43}
+	return file_paxos_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *MigrationGetDataRequest) GetMigrationId() string {
@@ -3037,7 +3037,7 @@ type MigrationDataItem struct {
 
 func (x *MigrationDataItem) Reset() {
 	*x = MigrationDataItem{}
-	mi := &file_proto_paxos_proto_msgTypes[44]
+	mi := &file_paxos_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3049,7 +3049,7 @@ func (x *MigrationDataItem) String() string {
 func (*MigrationDataItem) ProtoMessage() {}
 
 func (x *MigrationDataItem) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[44]
+	mi := &file_paxos_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3062,7 +3062,7 @@ func (x *MigrationDataItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationDataItem.ProtoReflect.Descriptor instead.
 func (*MigrationDataItem) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{44}
+	return file_paxos_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *MigrationDataItem) GetItemId() int32 {
@@ -3091,7 +3091,7 @@ type MigrationGetDataReply struct {
 
 func (x *MigrationGetDataReply) Reset() {
 	*x = MigrationGetDataReply{}
-	mi := &file_proto_paxos_proto_msgTypes[45]
+	mi := &file_paxos_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3103,7 +3103,7 @@ func (x *MigrationGetDataReply) String() string {
 func (*MigrationGetDataReply) ProtoMessage() {}
 
 func (x *MigrationGetDataReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[45]
+	mi := &file_paxos_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3116,7 +3116,7 @@ func (x *MigrationGetDataReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationGetDataReply.ProtoReflect.Descriptor instead.
 func (*MigrationGetDataReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{45}
+	return file_paxos_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *MigrationGetDataReply) GetSuccess() bool {
@@ -3159,7 +3159,7 @@ type MigrationSetDataRequest struct {
 
 func (x *MigrationSetDataRequest) Reset() {
 	*x = MigrationSetDataRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[46]
+	mi := &file_paxos_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3171,7 +3171,7 @@ func (x *MigrationSetDataRequest) String() string {
 func (*MigrationSetDataRequest) ProtoMessage() {}
 
 func (x *MigrationSetDataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[46]
+	mi := &file_paxos_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3184,7 +3184,7 @@ func (x *MigrationSetDataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationSetDataRequest.ProtoReflect.Descriptor instead.
 func (*MigrationSetDataRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{46}
+	return file_paxos_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *MigrationSetDataRequest) GetMigrationId() string {
@@ -3219,7 +3219,7 @@ type MigrationSetDataReply struct {
 
 func (x *MigrationSetDataReply) Reset() {
 	*x = MigrationSetDataReply{}
-	mi := &file_proto_paxos_proto_msgTypes[47]
+	mi := &file_paxos_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3231,7 +3231,7 @@ func (x *MigrationSetDataReply) String() string {
 func (*MigrationSetDataReply) ProtoMessage() {}
 
 func (x *MigrationSetDataReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[47]
+	mi := &file_paxos_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3244,7 +3244,7 @@ func (x *MigrationSetDataReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationSetDataReply.ProtoReflect.Descriptor instead.
 func (*MigrationSetDataReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{47}
+	return file_paxos_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *MigrationSetDataReply) GetSuccess() bool {
@@ -3279,7 +3279,7 @@ type MigrationCommitRequest struct {
 
 func (x *MigrationCommitRequest) Reset() {
 	*x = MigrationCommitRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[48]
+	mi := &file_paxos_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3291,7 +3291,7 @@ func (x *MigrationCommitRequest) String() string {
 func (*MigrationCommitRequest) ProtoMessage() {}
 
 func (x *MigrationCommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[48]
+	mi := &file_paxos_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3304,7 +3304,7 @@ func (x *MigrationCommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationCommitRequest.ProtoReflect.Descriptor instead.
 func (*MigrationCommitRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{48}
+	return file_paxos_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *MigrationCommitRequest) GetMigrationId() string {
@@ -3332,7 +3332,7 @@ type MigrationCommitReply struct {
 
 func (x *MigrationCommitReply) Reset() {
 	*x = MigrationCommitReply{}
-	mi := &file_proto_paxos_proto_msgTypes[49]
+	mi := &file_paxos_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3344,7 +3344,7 @@ func (x *MigrationCommitReply) String() string {
 func (*MigrationCommitReply) ProtoMessage() {}
 
 func (x *MigrationCommitReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[49]
+	mi := &file_paxos_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3357,7 +3357,7 @@ func (x *MigrationCommitReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationCommitReply.ProtoReflect.Descriptor instead.
 func (*MigrationCommitReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{49}
+	return file_paxos_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *MigrationCommitReply) GetSuccess() bool {
@@ -3392,7 +3392,7 @@ type MigrationRollbackRequest struct {
 
 func (x *MigrationRollbackRequest) Reset() {
 	*x = MigrationRollbackRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[50]
+	mi := &file_paxos_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3404,7 +3404,7 @@ func (x *MigrationRollbackRequest) String() string {
 func (*MigrationRollbackRequest) ProtoMessage() {}
 
 func (x *MigrationRollbackRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[50]
+	mi := &file_paxos_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3417,7 +3417,7 @@ func (x *MigrationRollbackRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationRollbackRequest.ProtoReflect.Descriptor instead.
 func (*MigrationRollbackRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{50}
+	return file_paxos_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *MigrationRollbackRequest) GetMigrationId() string {
@@ -3445,7 +3445,7 @@ type MigrationRollbackReply struct {
 
 func (x *MigrationRollbackReply) Reset() {
 	*x = MigrationRollbackReply{}
-	mi := &file_proto_paxos_proto_msgTypes[51]
+	mi := &file_paxos_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3457,7 +3457,7 @@ func (x *MigrationRollbackReply) String() string {
 func (*MigrationRollbackReply) ProtoMessage() {}
 
 func (x *MigrationRollbackReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[51]
+	mi := &file_paxos_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3470,7 +3470,7 @@ func (x *MigrationRollbackReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationRollbackReply.ProtoReflect.Descriptor instead.
 func (*MigrationRollbackReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{51}
+	return file_paxos_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *MigrationRollbackReply) GetSuccess() bool {
@@ -3504,7 +3504,7 @@ type GetAccessStatsRequest struct {
 
 func (x *GetAccessStatsRequest) Reset() {
 	*x = GetAccessStatsRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[52]
+	mi := &file_paxos_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3516,7 +3516,7 @@ func (x *GetAccessStatsRequest) String() string {
 func (*GetAccessStatsRequest) ProtoMessage() {}
 
 func (x *GetAccessStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[52]
+	mi := &file_paxos_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3529,7 +3529,7 @@ func (x *GetAccessStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAccessStatsRequest.ProtoReflect.Descriptor instead.
 func (*GetAccessStatsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{52}
+	return file_paxos_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *GetAccessStatsRequest) GetReset_() bool {
@@ -3550,7 +3550,7 @@ type CoAccessPair struct {
 
 func (x *CoAccessPair) Reset() {
 	*x = CoAccessPair{}
-	mi := &file_proto_paxos_proto_msgTypes[53]
+	mi := &file_paxos_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3562,7 +3562,7 @@ func (x *CoAccessPair) String() string {
 func (*CoAccessPair) ProtoMessage() {}
 
 func (x *CoAccessPair) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[53]
+	mi := &file_paxos_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3575,7 +3575,7 @@ func (x *CoAccessPair) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CoAccessPair.ProtoReflect.Descriptor instead.
 func (*CoAccessPair) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{53}
+	return file_paxos_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *CoAccessPair) GetItem1() int32 {
@@ -3614,7 +3614,7 @@ type GetAccessStatsReply struct {
 
 func (x *GetAccessStatsReply) Reset() {
 	*x = GetAccessStatsReply{}
-	mi := &file_proto_paxos_proto_msgTypes[54]
+	mi := &file_paxos_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3626,7 +3626,7 @@ func (x *GetAccessStatsReply) String() string {
 func (*GetAccessStatsReply) ProtoMessage() {}
 
 func (x *GetAccessStatsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[54]
+	mi := &file_paxos_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3639,7 +3639,7 @@ func (x *GetAccessStatsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAccessStatsReply.ProtoReflect.Descriptor instead.
 func (*GetAccessStatsReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{54}
+	return file_paxos_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *GetAccessStatsReply) GetSuccess() bool {
@@ -3703,7 +3703,7 @@ type TriggerRebalanceRequest struct {
 
 func (x *TriggerRebalanceRequest) Reset() {
 	*x = TriggerRebalanceRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[55]
+	mi := &file_paxos_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3715,7 +3715,7 @@ func (x *TriggerRebalanceRequest) String() string {
 func (*TriggerRebalanceRequest) ProtoMessage() {}
 
 func (x *TriggerRebalanceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[55]
+	mi := &file_paxos_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3728,7 +3728,7 @@ func (x *TriggerRebalanceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerRebalanceRequest.ProtoReflect.Descriptor instead.
 func (*TriggerRebalanceRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{55}
+	return file_paxos_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *TriggerRebalanceRequest) GetDryRun() bool {
@@ -3764,7 +3764,7 @@ type MigrationMove struct {
 
 func (x *MigrationMove) Reset() {
 	*x = MigrationMove{}
-	mi := &file_proto_paxos_proto_msgTypes[56]
+	mi := &file_paxos_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3776,7 +3776,7 @@ func (x *MigrationMove) String() string {
 func (*MigrationMove) ProtoMessage() {}
 
 func (x *MigrationMove) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[56]
+	mi := &file_paxos_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3789,7 +3789,7 @@ func (x *MigrationMove) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigrationMove.ProtoReflect.Descriptor instead.
 func (*MigrationMove) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{56}
+	return file_paxos_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *MigrationMove) GetItemId() int32 {
@@ -3836,7 +3836,7 @@ type TriggerRebalanceReply struct {
 
 func (x *TriggerRebalanceReply) Reset() {
 	*x = TriggerRebalanceReply{}
-	mi := &file_proto_paxos_proto_msgTypes[57]
+	mi := &file_paxos_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3848,7 +3848,7 @@ func (x *TriggerRebalanceReply) String() string {
 func (*TriggerRebalanceReply) ProtoMessage() {}
 
 func (x *TriggerRebalanceReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[57]
+	mi := &file_paxos_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3861,7 +3861,7 @@ func (x *TriggerRebalanceReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerRebalanceReply.ProtoReflect.Descriptor instead.
 func (*TriggerRebalanceReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{57}
+	return file_paxos_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *TriggerRebalanceReply) GetSuccess() bool {
@@ -3931,7 +3931,7 @@ type PrintReshardRequest struct {
 
 func (x *PrintReshardRequest) Reset() {
 	*x = PrintReshardRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[58]
+	mi := &file_paxos_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3943,7 +3943,7 @@ func (x *PrintReshardRequest) String() string {
 func (*PrintReshardRequest) ProtoMessage() {}
 
 func (x *PrintReshardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[58]
+	mi := &file_paxos_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3956,7 +3956,7 @@ func (x *PrintReshardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintReshardRequest.ProtoReflect.Descriptor instead.
 func (*PrintReshardRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{58}
+	return file_paxos_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *PrintReshardRequest) GetExecute() bool {
@@ -3984,7 +3984,7 @@ type ReshardTriplet struct {
 
 func (x *ReshardTriplet) Reset() {
 	*x = ReshardTriplet{}
-	mi := &file_proto_paxos_proto_msgTypes[59]
+	mi := &file_paxos_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3996,7 +3996,7 @@ func (x *ReshardTriplet) String() string {
 func (*ReshardTriplet) ProtoMessage() {}
 
 func (x *ReshardTriplet) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[59]
+	mi := &file_paxos_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4009,7 +4009,7 @@ func (x *ReshardTriplet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReshardTriplet.ProtoReflect.Descriptor instead.
 func (*ReshardTriplet) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{59}
+	return file_paxos_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ReshardTriplet) GetItemId() int32 {
@@ -4044,7 +4044,7 @@ type PrintReshardReply struct {
 
 func (x *PrintReshardReply) Reset() {
 	*x = PrintReshardReply{}
-	mi := &file_proto_paxos_proto_msgTypes[60]
+	mi := &file_paxos_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4056,7 +4056,7 @@ func (x *PrintReshardReply) String() string {
 func (*PrintReshardReply) ProtoMessage() {}
 
 func (x *PrintReshardReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[60]
+	mi := &file_paxos_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4069,7 +4069,7 @@ func (x *PrintReshardReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrintReshardReply.ProtoReflect.Descriptor instead.
 func (*PrintReshardReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{60}
+	return file_paxos_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *PrintReshardReply) GetSuccess() bool {
@@ -4105,7 +4105,7 @@ type FlushStateRequest struct {
 
 func (x *FlushStateRequest) Reset() {
 	*x = FlushStateRequest{}
-	mi := &file_proto_paxos_proto_msgTypes[61]
+	mi := &file_paxos_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4117,7 +4117,7 @@ func (x *FlushStateRequest) String() string {
 func (*FlushStateRequest) ProtoMessage() {}
 
 func (x *FlushStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[61]
+	mi := &file_paxos_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4130,7 +4130,7 @@ func (x *FlushStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushStateRequest.ProtoReflect.Descriptor instead.
 func (*FlushStateRequest) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{61}
+	return file_paxos_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *FlushStateRequest) GetResetDatabase() bool {
@@ -4164,7 +4164,7 @@ type FlushStateReply struct {
 
 func (x *FlushStateReply) Reset() {
 	*x = FlushStateReply{}
-	mi := &file_proto_paxos_proto_msgTypes[62]
+	mi := &file_paxos_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4176,7 +4176,7 @@ func (x *FlushStateReply) String() string {
 func (*FlushStateReply) ProtoMessage() {}
 
 func (x *FlushStateReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_paxos_proto_msgTypes[62]
+	mi := &file_paxos_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4189,7 +4189,7 @@ func (x *FlushStateReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushStateReply.ProtoReflect.Descriptor instead.
 func (*FlushStateReply) Descriptor() ([]byte, []int) {
-	return file_proto_paxos_proto_rawDescGZIP(), []int{62}
+	return file_paxos_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *FlushStateReply) GetSuccess() bool {
@@ -4206,11 +4206,11 @@ func (x *FlushStateReply) GetMessage() string {
 	return ""
 }
 
-var File_proto_paxos_proto protoreflect.FileDescriptor
+var File_paxos_proto protoreflect.FileDescriptor
 
-const file_proto_paxos_proto_rawDesc = "" +
+const file_paxos_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/paxos.proto\x12\x05paxos\"9\n" +
+	"\vpaxos.proto\x12\x05paxos\"9\n" +
 	"\x06Ballot\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\x05R\x06number\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\x05R\x06nodeId\"Y\n" +
@@ -4578,20 +4578,20 @@ const file_proto_paxos_proto_rawDesc = "" +
 	"FlushState\x12\x18.paxos.FlushStateRequest\x1a\x16.paxos.FlushStateReplyB\tZ\a./protob\x06proto3"
 
 var (
-	file_proto_paxos_proto_rawDescOnce sync.Once
-	file_proto_paxos_proto_rawDescData []byte
+	file_paxos_proto_rawDescOnce sync.Once
+	file_paxos_proto_rawDescData []byte
 )
 
-func file_proto_paxos_proto_rawDescGZIP() []byte {
-	file_proto_paxos_proto_rawDescOnce.Do(func() {
-		file_proto_paxos_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_paxos_proto_rawDesc), len(file_proto_paxos_proto_rawDesc)))
+func file_paxos_proto_rawDescGZIP() []byte {
+	file_paxos_proto_rawDescOnce.Do(func() {
+		file_paxos_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_paxos_proto_rawDesc), len(file_paxos_proto_rawDesc)))
 	})
-	return file_proto_paxos_proto_rawDescData
+	return file_paxos_proto_rawDescData
 }
 
-var file_proto_paxos_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_paxos_proto_msgTypes = make([]protoimpl.MessageInfo, 66)
-var file_proto_paxos_proto_goTypes = []any{
+var file_paxos_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_paxos_proto_msgTypes = make([]protoimpl.MessageInfo, 66)
+var file_paxos_proto_goTypes = []any{
 	(ResultType)(0),                  // 0: paxos.ResultType
 	(*Ballot)(nil),                   // 1: paxos.Ballot
 	(*Transaction)(nil),              // 2: paxos.Transaction
@@ -4660,7 +4660,7 @@ var file_proto_paxos_proto_goTypes = []any{
 	nil,                              // 65: paxos.GetCheckpointReply.StateEntry
 	nil,                              // 66: paxos.MigrationPrepareRequest.TargetClustersEntry
 }
-var file_proto_paxos_proto_depIdxs = []int32{
+var file_paxos_proto_depIdxs = []int32{
 	2,  // 0: paxos.TransactionRequest.transaction:type_name -> paxos.Transaction
 	1,  // 1: paxos.TransactionReply.ballot:type_name -> paxos.Ballot
 	0,  // 2: paxos.TransactionReply.result:type_name -> paxos.ResultType
@@ -4750,27 +4750,27 @@ var file_proto_paxos_proto_depIdxs = []int32{
 	0,  // [0:28] is the sub-list for field type_name
 }
 
-func init() { file_proto_paxos_proto_init() }
-func file_proto_paxos_proto_init() {
-	if File_proto_paxos_proto != nil {
+func init() { file_paxos_proto_init() }
+func file_paxos_proto_init() {
+	if File_paxos_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_paxos_proto_rawDesc), len(file_proto_paxos_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_paxos_proto_rawDesc), len(file_paxos_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   66,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_paxos_proto_goTypes,
-		DependencyIndexes: file_proto_paxos_proto_depIdxs,
-		EnumInfos:         file_proto_paxos_proto_enumTypes,
-		MessageInfos:      file_proto_paxos_proto_msgTypes,
+		GoTypes:           file_paxos_proto_goTypes,
+		DependencyIndexes: file_paxos_proto_depIdxs,
+		EnumInfos:         file_paxos_proto_enumTypes,
+		MessageInfos:      file_paxos_proto_msgTypes,
 	}.Build()
-	File_proto_paxos_proto = out.File
-	file_proto_paxos_proto_goTypes = nil
-	file_proto_paxos_proto_depIdxs = nil
+	File_paxos_proto = out.File
+	file_paxos_proto_goTypes = nil
+	file_paxos_proto_depIdxs = nil
 }

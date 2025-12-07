@@ -2,17 +2,17 @@ package node
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
-	"os"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/cockroachdb/pebble"
 
 	"paxos-banking/internal/config"
 	"paxos-banking/internal/redistribution"
@@ -30,36 +30,42 @@ type Lock struct {
 type Node struct {
 	pb.UnimplementedPaxosNodeServer
 
-	mu sync.RWMutex
+	// 🔒 FINE-GRAINED LOCKING: Split n.mu into specialized locks
+	// This allows parallel operations on independent state
+	paxosMu   sync.RWMutex // Protects: isLeader, ballots, leaderID, systemInitialized
+	logMu     sync.RWMutex // Protects: log, newViewLog, nextSeqNum, lastExecuted
+	balanceMu sync.RWMutex // Protects: balances (read-heavy, benefits from RWMutex)
+	clientMu  sync.RWMutex // Protects: clientLastReply, clientLastTS
+	execMu    sync.Mutex   // Protects: transaction execution (ensures sequential execution for linearizability)
 
-	// Identity
+	// Identity (read-only after init, no lock needed)
 	id        int32
 	clusterID int32
 	address   string
 	config    *config.Config
 
-	// Paxos state
+	// Paxos state (protected by paxosMu)
 	isLeader       bool
 	currentBallot  *types.Ballot
 	promisedBallot *types.Ballot
 	leaderID       int32
 
-	// Sequence tracking
+	// Sequence tracking (protected by logMu)
 	nextSeqNum   int32
 	lastExecuted int32
 
-	// Logs
+	// Logs (protected by logMu)
 	log        map[int32]*types.LogEntry // Single log with status tracking (A/C/E)
 	newViewLog []*pb.NewViewRequest
 
-	// Client tracking
+	// Client tracking (protected by clientMu)
 	clientLastReply map[string]*pb.TransactionReply
 	clientLastTS    map[string]int64
 
-	// Database - changed from client IDs to data item IDs
+	// Database (protected by balanceMu) - changed from client IDs to data item IDs
 	balances map[int32]int32 // dataItemID -> balance
 
-	// Locking mechanism (Phase 2)
+	// Locking mechanism (Phase 2) - has own lockMu
 	lockMu      sync.Mutex      // Separate mutex for lock operations
 	locks       map[int32]*Lock // dataItemID -> Lock
 	lockTimeout time.Duration   // How long to wait for a lock
@@ -92,7 +98,9 @@ type Node struct {
 	isActive bool
 
 	// 💾 Persistence
-	dbFilePath string
+	dataDir    string
+	dbFilePath string     // Legacy JSON file path
+	pebbleDB   *pebble.DB // PebbleDB handle for fast persistence
 
 	// 🎯 System Initialization
 	systemInitialized bool
@@ -171,22 +179,49 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		migrationState:    nil,                                     // Phase 9: Initialized on first migration
 	}
 
-	// Initialize database with data items in this node's shard
-	log.Printf("Node %d (Cluster %d): 🔄 Initializing fresh database for shard", id, clusterID)
-	cluster := cfg.Clusters[int(clusterID)]
-	for itemID := cluster.ShardStart; itemID <= cluster.ShardEnd; itemID++ {
-		n.balances[itemID] = cfg.Data.InitialBalance
+	// Open PebbleDB for persistent storage
+	pebbleDir := fmt.Sprintf("data/node%d_pebble", id)
+	opts := &pebble.Options{
+		// Optimize for write-heavy workload
+		MemTableSize:             64 << 20, // 64 MB
+		MaxConcurrentCompactions: func() int { return 2 },
+		L0CompactionThreshold:    4,
+		L0StopWritesThreshold:    8,
 	}
 
-	// Save initial state to disk
-	if err := n.saveDatabase(); err != nil {
-		log.Printf("Node %d: ⚠️  Warning - failed to save initial database: %v", id, err)
-	} else {
+	db, err := pebble.Open(pebbleDir, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open PebbleDB: %w", err)
+	}
+	n.pebbleDB = db
+	n.dataDir = "data"
+
+	log.Printf("Node %d: 💾 Opened PebbleDB at %s", id, pebbleDir)
+
+	// Try to load existing database from PebbleDB
+	log.Printf("Node %d (Cluster %d): 🔄 Loading database from PebbleDB", id, clusterID)
+	if err := n.loadDatabase(); err != nil {
+		log.Printf("Node %d: No existing database, initializing fresh", id)
+
+		// Initialize database with data items in this node's shard
+		cluster := cfg.Clusters[int(clusterID)]
+		for itemID := cluster.ShardStart; itemID <= cluster.ShardEnd; itemID++ {
+			n.balances[itemID] = cfg.Data.InitialBalance
+		}
+
+		// Save initial state to PebbleDB
+		if err := n.saveDatabase(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to save initial database: %w", err)
+		}
+
 		log.Printf("Node %d (Cluster %d): 💾 Initialized %d data items (range %d-%d) with balance %d",
 			id, clusterID, len(n.balances), cluster.ShardStart, cluster.ShardEnd, cfg.Data.InitialBalance)
+	} else {
+		log.Printf("Node %d: ✅ Loaded %d items from PebbleDB", id, len(n.balances))
 	}
 
-	log.Printf("Node %d (Cluster %d): Timer set to %v (base: 500ms + jitter: %v)",
+	log.Printf("Node %d (Cluster %d): Timer set to %v (base: 100ms + jitter: %v)",
 		id, clusterID, timerDuration, jitter)
 
 	return n, nil
@@ -230,8 +265,8 @@ func (n *Node) Start() error {
 }
 
 func (n *Node) connectToPeers() error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	// No lock needed - connections are set up once during initialization
+	// (peerClients and allClusterClients are effectively read-only after this)
 
 	// Connect to peers within the same cluster
 	clusterNodes := n.config.GetNodesInCluster(int(n.clusterID))
@@ -302,9 +337,8 @@ func (n *Node) getCrossClusterClient(nodeID int32) (pb.PaxosNodeClient, error) {
 		return nil, fmt.Errorf("self-reference: use local handler")
 	}
 
-	n.mu.RLock()
+	// Check if client already exists (no lock - allClusterClients effectively read-only after setup)
 	client, exists := n.allClusterClients[nodeID]
-	n.mu.RUnlock()
 
 	if exists {
 		return client, nil
@@ -329,26 +363,25 @@ func (n *Node) getCrossClusterClient(nodeID int32) (pb.PaxosNodeClient, error) {
 
 	client = pb.NewPaxosNodeClient(conn)
 
-	// Save the connection for future use
-	n.mu.Lock()
+	// Save the connection for future use (no lock - connections set up once)
 	n.allClusterConns[nodeID] = conn
 	n.allClusterClients[nodeID] = client
-	n.mu.Unlock()
 
 	log.Printf("Node %d: ✅ Established cross-cluster connection to node %d", n.id, nodeID)
 	return client, nil
 }
 
 func (n *Node) Stop() {
-	n.mu.Lock()
+	// Check and update active status (use paxosMu)
+	n.paxosMu.Lock()
 	if !n.isActive {
-		n.mu.Unlock()
+		n.paxosMu.Unlock()
 		return
 	}
 	n.isActive = false
-	n.mu.Unlock()
+	n.paxosMu.Unlock()
 
-	// stop timers & heartbeats
+	// Stop timers & heartbeats
 	n.timerMu.Lock()
 	if n.leaderTimer != nil {
 		n.leaderTimer.Stop()
@@ -357,14 +390,12 @@ func (n *Node) Stop() {
 
 	n.stopHeartbeat()
 
-	// close peer conns
-	n.mu.Lock()
+	// Close peer conns (no lock - done during shutdown)
 	for _, c := range n.peerConns {
 		_ = c.Close()
 	}
 	n.peerConns = map[int32]*grpc.ClientConn{}
 	n.peerClients = map[int32]pb.PaxosNodeClient{}
-	n.mu.Unlock()
 
 	// stop server
 	if n.grpcServer != nil {
@@ -376,8 +407,8 @@ func (n *Node) Stop() {
 
 func (n *Node) quorumSize() int {
 	// quorum is floor(N/2) + 1 where N is the cluster size (not total nodes)
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+	n.paxosMu.RLock()
+	defer n.paxosMu.RUnlock()
 	clusterNodes := n.config.GetNodesInCluster(int(n.clusterID))
 	total := len(clusterNodes)
 	if total <= 0 {
@@ -414,10 +445,10 @@ func (n *Node) resetLeaderTimer() {
 
 	go func() {
 		<-n.leaderTimer.C
-		n.mu.RLock()
+		n.paxosMu.RLock()
 		isLeader := n.isLeader
 		active := n.isActive
-		n.mu.RUnlock()
+		n.paxosMu.RUnlock()
 
 		if !isLeader && active {
 			log.Printf("Node %d: ⏰ Leader timeout - starting election", n.id)
@@ -428,13 +459,13 @@ func (n *Node) resetLeaderTimer() {
 
 func (n *Node) startHeartbeat() {
 	// start only once
-	n.mu.Lock()
+	n.paxosMu.Lock()
 	if n.heartbeatStop != nil {
-		n.mu.Unlock()
+		n.paxosMu.Unlock()
 		return
 	}
 	n.heartbeatStop = make(chan struct{})
-	n.mu.Unlock()
+	n.paxosMu.Unlock()
 
 	go func() {
 		ticker := time.NewTicker(n.heartbeatInterval)
@@ -442,9 +473,9 @@ func (n *Node) startHeartbeat() {
 		for {
 			select {
 			case <-ticker.C:
-				n.mu.RLock()
+				n.paxosMu.RLock()
 				if !n.isLeader {
-					n.mu.RUnlock()
+					n.paxosMu.RUnlock()
 					return
 				}
 				// snapshot peer clients
@@ -458,7 +489,7 @@ func (n *Node) startHeartbeat() {
 				} else {
 					ballotProto = types.NewBallot(0, n.id).ToProto()
 				}
-				n.mu.RUnlock()
+				n.paxosMu.RUnlock()
 
 				// send best-effort no-op Accept messages (heartbeat)
 				for pid, cli := range peers {
@@ -486,8 +517,8 @@ func (n *Node) startHeartbeat() {
 }
 
 func (n *Node) stopHeartbeat() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.paxosMu.Lock()
+	defer n.paxosMu.Unlock()
 	if n.heartbeatStop != nil {
 		select {
 		default:
@@ -507,9 +538,9 @@ func (n *Node) retryPeerConnections() {
 	for {
 		select {
 		case <-ticker.C:
-			n.mu.Lock()
+			n.paxosMu.Lock()
 			if !n.isActive {
-				n.mu.Unlock()
+				n.paxosMu.Unlock()
 				return
 			}
 
@@ -530,7 +561,7 @@ func (n *Node) retryPeerConnections() {
 					}{id: nid, addr: n.config.GetNodeAddress(int(nid))})
 				}
 			}
-			n.mu.Unlock()
+			n.paxosMu.Unlock()
 
 			// Try to connect to missing peers
 			for _, peer := range missingPeers {
@@ -539,12 +570,12 @@ func (n *Node) retryPeerConnections() {
 				cancel()
 
 				if err == nil {
-					n.mu.Lock()
+					n.paxosMu.Lock()
 					n.peerConns[peer.id] = conn
 					n.peerClients[peer.id] = pb.NewPaxosNodeClient(conn)
 					n.allClusterClients[peer.id] = n.peerClients[peer.id]
 					n.allClusterConns[peer.id] = n.peerConns[peer.id]
-					n.mu.Unlock()
+					n.paxosMu.Unlock()
 					log.Printf("Node %d (Cluster %d): Reconnected to peer node %d (%s)", n.id, n.clusterID, peer.id, peer.addr)
 				}
 			}
@@ -556,23 +587,127 @@ func (n *Node) retryPeerConnections() {
 }
 
 // saveDatabase persists the current balance state to a JSON file
+// saveBalance persists a single balance update to PebbleDB (fast!)
+// This is called after every transaction
+// Note: Using NoSync for simulation performance (OS will flush within 5-30s)
+func (n *Node) saveBalance(itemID int32, balance int32) error {
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
+	}
+
+	key := []byte(fmt.Sprintf("balance:%d", itemID))
+	value := []byte(fmt.Sprintf("%d", balance))
+
+	// Write single item without fsync for speed (safe in controlled simulation)
+	if err := n.pebbleDB.Set(key, value, pebble.NoSync); err != nil {
+		return fmt.Errorf("failed to save balance for item %d: %w", itemID, err)
+	}
+
+	return nil
+}
+
+// saveDatabase persists the entire database to PebbleDB (used for initialization)
 func (n *Node) saveDatabase() error {
-	n.mu.RLock()
-	balancesCopy := make(map[int32]int32, len(n.balances))
-	for k, v := range n.balances {
-		balancesCopy[k] = v
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
 	}
-	n.mu.RUnlock()
 
-	data, err := json.MarshalIndent(balancesCopy, "", "  ")
+	// Use balanceMu for balance access
+	n.balanceMu.RLock()
+	defer n.balanceMu.RUnlock()
+
+	// Write all balances to PebbleDB in a batch for efficiency
+	batch := n.pebbleDB.NewBatch()
+	defer batch.Close()
+
+	for itemID, balance := range n.balances {
+		key := []byte(fmt.Sprintf("balance:%d", itemID))
+		value := []byte(fmt.Sprintf("%d", balance))
+
+		if err := batch.Set(key, value, pebble.NoSync); err != nil {
+			return fmt.Errorf("failed to set balance for item %d: %w", itemID, err)
+		}
+	}
+
+	// Commit the batch (this is where fsync happens for durability)
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("failed to commit batch: %w", err)
+	}
+
+	return nil
+}
+
+// loadDatabase loads the database from PebbleDB on startup
+func (n *Node) loadDatabase() error {
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
+	}
+
+	// Use balanceMu for balance access
+	n.balanceMu.Lock()
+	defer n.balanceMu.Unlock()
+
+	// Iterate over all balance keys
+	iter, err := n.pebbleDB.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("balance:"),
+		UpperBound: []byte("balance;"), // Next character after ':' in ASCII
+	})
 	if err != nil {
-		return fmt.Errorf("failed to marshal balances: %w", err)
+		return fmt.Errorf("failed to create iterator: %w", err)
+	}
+	defer iter.Close()
+
+	count := 0
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := string(iter.Key())
+		value := string(iter.Value())
+
+		var itemID, balance int32
+		if _, err := fmt.Sscanf(key, "balance:%d", &itemID); err != nil {
+			log.Printf("Node %d: ⚠️  Warning - failed to parse key %s: %v", n.id, key, err)
+			continue
+		}
+		if _, err := fmt.Sscanf(value, "%d", &balance); err != nil {
+			log.Printf("Node %d: ⚠️  Warning - failed to parse value for key %s: %v", n.id, key, err)
+			continue
+		}
+
+		n.balances[itemID] = balance
+		count++
 	}
 
-	if err := os.WriteFile(n.dbFilePath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write database file: %w", err)
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("iterator error: %w", err)
 	}
 
+	if count == 0 {
+		return fmt.Errorf("no data found")
+	}
+
+	return nil
+}
+
+// Close shuts down the node and closes PebbleDB
+func (n *Node) Close() error {
+	log.Printf("Node %d: Closing...", n.id)
+
+	// Stop all background goroutines
+	close(n.stopChan)
+
+	// Close gRPC server
+	if n.grpcServer != nil {
+		n.grpcServer.GracefulStop()
+	}
+
+	// Close PebbleDB
+	if n.pebbleDB != nil {
+		log.Printf("Node %d: Closing PebbleDB", n.id)
+		if err := n.pebbleDB.Close(); err != nil {
+			return fmt.Errorf("failed to close PebbleDB: %w", err)
+		}
+	}
+
+	log.Printf("Node %d: ✅ Closed successfully", n.id)
 	return nil
 }
 
@@ -592,9 +727,9 @@ func (n *Node) startGapDetection() {
 
 // checkForGaps checks if there are gaps in the log and triggers recovery if needed
 func (n *Node) checkForGaps() {
-	n.mu.RLock()
+	n.paxosMu.RLock()
 	if !n.isActive {
-		n.mu.RUnlock()
+		n.paxosMu.RUnlock()
 		return
 	}
 
@@ -607,13 +742,13 @@ func (n *Node) checkForGaps() {
 	}
 	leaderID := n.leaderID
 	isLeader := n.isLeader
-	n.mu.RUnlock()
+	n.paxosMu.RUnlock()
 
 	// 🔥 FIX: If we have gaps and we're NOT the leader, request the leader to trigger NEW-VIEW
 	// This breaks the deadlock where nodes with gaps wait forever for data
 	if maxSeq > lastExec+1 {
 		// Check if we have actual gaps (not just uncommitted sequences)
-		n.mu.RLock()
+		n.paxosMu.RLock()
 		hasGaps := false
 		for seq := lastExec + 1; seq < maxSeq; seq++ {
 			if _, exists := n.log[seq]; !exists {
@@ -621,7 +756,7 @@ func (n *Node) checkForGaps() {
 				break
 			}
 		}
-		n.mu.RUnlock()
+		n.paxosMu.RUnlock()
 
 		if hasGaps && !isLeader && leaderID > 0 {
 			// We have gaps and there's a leader - send a special request to trigger NEW-VIEW
@@ -641,7 +776,7 @@ func (n *Node) checkForGaps() {
 // This breaks the deadlock where nodes with gaps can't recover
 func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 	// Find which sequences we're missing
-	n.mu.RLock()
+	n.paxosMu.RLock()
 	lastExec := n.lastExecuted
 	maxSeqLocal := lastExec
 	for seq := range n.log {
@@ -654,7 +789,7 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 	for k, v := range n.peerClients {
 		peers[k] = v
 	}
-	n.mu.RUnlock()
+	n.paxosMu.RUnlock()
 
 	// 🔥 FIX: Query peers to find the REAL maximum sequence in the cluster
 	maxSeqCluster := maxSeqLocal
@@ -675,9 +810,9 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 	// Identify ALL missing sequences (including ones we didn't know about)
 	missingSeqs := []int32{}
 	for seq := lastExec + 1; seq <= maxSeq; seq++ {
-		n.mu.RLock()
+		n.paxosMu.RLock()
 		_, exists := n.log[seq]
-		n.mu.RUnlock()
+		n.paxosMu.RUnlock()
 		if !exists {
 			missingSeqs = append(missingSeqs, seq)
 		}
@@ -859,8 +994,8 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 	log.Printf("Node %d: 🔄 FlushState requested (db=%v, logs=%v, ballot=%v)",
 		n.id, req.ResetDatabase, req.ResetLogs, req.ResetBallot)
 
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.paxosMu.Lock()
+	defer n.paxosMu.Unlock()
 
 	// Reset database to initial state
 	if req.ResetDatabase {
@@ -873,11 +1008,11 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 			n.id, len(n.balances), n.config.Data.InitialBalance)
 
 		// Save to disk
-		n.mu.Unlock()
+		n.paxosMu.Unlock()
 		if err := n.saveDatabase(); err != nil {
 			log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
 		}
-		n.mu.Lock()
+		n.paxosMu.Lock()
 	}
 
 	// Reset Paxos logs
@@ -947,16 +1082,9 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 		n.leaderTimer = time.NewTimer(2 * time.Second)
 	}
 
-	// Trigger leader election after flush to ensure system is ready
-	// Only trigger if this is the expected leader for the cluster
-	expectedLeader := n.config.GetLeaderNodeForCluster(int(n.clusterID))
-	if expectedLeader == n.id {
-		log.Printf("Node %d: Triggering leader election after flush (expected leader for cluster %d)", n.id, n.clusterID)
-		go func() {
-			time.Sleep(100 * time.Millisecond) // Brief delay
-			n.StartLeaderElection()
-		}()
-	}
+	// DON'T trigger election here - let SetActive handle it
+	// Problem: if expected leader is inactive, election won't start
+	// Better to let each node decide when it becomes active via SetActive
 
 	return &pb.FlushStateReply{
 		Success: true,

@@ -87,8 +87,8 @@ func (n *Node) abortWAL(txnID string) error {
 	log.Printf("Node %d: 🔄 WAL[%s]: Aborting - rolling back %d operations",
 		n.id, txnID, len(entry.Operations))
 
-	// Undo operations in REVERSE order
-	n.mu.Lock()
+	// Undo operations in REVERSE order (use balanceMu)
+	n.balanceMu.Lock()
 	for i := len(entry.Operations) - 1; i >= 0; i-- {
 		op := entry.Operations[i]
 
@@ -98,7 +98,7 @@ func (n *Node) abortWAL(txnID string) error {
 		log.Printf("Node %d: ↩️  WAL[%s]: Undo %s item %d: %d -> %d (restored)",
 			n.id, txnID, op.Type, op.DataItem, op.NewValue, op.OldValue)
 	}
-	n.mu.Unlock()
+	n.balanceMu.Unlock()
 
 	// Save rolled-back database state
 	if err := n.saveDatabase(); err != nil {

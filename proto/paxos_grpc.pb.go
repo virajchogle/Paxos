@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.0
 // - protoc             v6.33.1
-// source: proto/paxos.proto
+// source: paxos.proto
 
 package proto
 
@@ -1129,5 +1129,5 @@ var PaxosNode_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/paxos.proto",
+	Metadata: "paxos.proto",
 }

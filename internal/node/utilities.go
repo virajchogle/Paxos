@@ -16,8 +16,8 @@ import (
 
 // PrintBalance - Query balance of a specific data item or range
 func (n *Node) PrintBalance(ctx context.Context, req *pb.PrintBalanceRequest) (*pb.PrintBalanceReply, error) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+	n.paxosMu.RLock()
+	defer n.paxosMu.RUnlock()
 
 	// Determine range
 	startItem := req.StartItem
@@ -88,8 +88,8 @@ func (n *Node) PrintBalance(ctx context.Context, req *pb.PrintBalanceRequest) (*
 
 // PrintDB - Display full database state for this node's shard
 func (n *Node) PrintDB(ctx context.Context, req *pb.PrintDBRequest) (*pb.PrintDBReply, error) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+	n.paxosMu.RLock()
+	defer n.paxosMu.RUnlock()
 
 	cluster := n.config.Clusters[int(n.clusterID)]
 	shardStart := int32(cluster.ShardStart)
@@ -148,8 +148,8 @@ func (n *Node) PrintDB(ctx context.Context, req *pb.PrintDBRequest) (*pb.PrintDB
 
 // PrintView - Show current Paxos state/view
 func (n *Node) PrintView(ctx context.Context, req *pb.PrintViewRequest) (*pb.PrintViewReply, error) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+	n.paxosMu.RLock()
+	defer n.paxosMu.RUnlock()
 
 	// Build recent log entries if requested
 	var recentLog []*pb.LogEntrySummary

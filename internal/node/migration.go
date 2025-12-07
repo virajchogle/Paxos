@@ -39,8 +39,8 @@ type ActiveMigration struct {
 
 // initMigration initializes migration state on a node
 func (n *Node) initMigration() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.balanceMu.Lock()
+	defer n.balanceMu.Unlock()
 
 	if n.migrationState == nil {
 		n.migrationState = &MigrationState{
@@ -96,9 +96,9 @@ func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareReq
 	preparedItems := make([]int32, 0, len(req.ItemIds))
 	for _, itemID := range req.ItemIds {
 		// Verify we own this item
-		n.mu.RLock()
+		n.balanceMu.RLock()
 		_, exists := n.balances[itemID]
-		n.mu.RUnlock()
+		n.balanceMu.RUnlock()
 
 		if !exists {
 			log.Printf("Node %d: Warning - item %d not found in local database", n.id, itemID)
@@ -159,7 +159,7 @@ func (n *Node) MigrationGetData(ctx context.Context, req *pb.MigrationGetDataReq
 
 	// Get item data
 	items := make([]*pb.MigrationDataItem, 0, len(req.ItemIds))
-	n.mu.RLock()
+	n.balanceMu.RLock()
 	for _, itemID := range req.ItemIds {
 		if balance, exists := n.balances[itemID]; exists {
 			items = append(items, &pb.MigrationDataItem{
@@ -168,7 +168,7 @@ func (n *Node) MigrationGetData(ctx context.Context, req *pb.MigrationGetDataReq
 			})
 		}
 	}
-	n.mu.RUnlock()
+	n.balanceMu.RUnlock()
 
 	log.Printf("Node %d: Retrieved %d items for migration %s", n.id, len(items), req.MigrationId)
 
@@ -242,12 +242,12 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 
 	if role == "source" {
 		// Source: Remove items from local database
-		n.mu.Lock()
+		n.balanceMu.Lock()
 		for _, itemID := range migration.Items {
 			delete(n.balances, itemID)
 			log.Printf("Node %d: Removed item %d (migrated out)", n.id, itemID)
 		}
-		n.mu.Unlock()
+		n.balanceMu.Unlock()
 
 		// Save database
 		if err := n.saveDatabase(); err != nil {
@@ -256,12 +256,12 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 
 	} else if role == "target" {
 		// Target: Move received items to main database
-		n.mu.Lock()
+		n.balanceMu.Lock()
 		for itemID, balance := range migration.ReceivedItems {
 			n.balances[itemID] = balance
 			log.Printf("Node %d: Added item %d with balance %d (migrated in)", n.id, itemID, balance)
 		}
-		n.mu.Unlock()
+		n.balanceMu.Unlock()
 
 		// Save database
 		if err := n.saveDatabase(); err != nil {
@@ -374,9 +374,9 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 	n.initMigration()
 
 	// Only leader can trigger rebalance
-	n.mu.RLock()
+	n.balanceMu.RLock()
 	isLeader := n.isLeader
-	n.mu.RUnlock()
+	n.balanceMu.RUnlock()
 
 	if !isLeader {
 		return &pb.TriggerRebalanceReply{
@@ -474,9 +474,9 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 	n.initMigration()
 
 	// Only leader can trigger reshard
-	n.mu.RLock()
+	n.balanceMu.RLock()
 	isLeader := n.isLeader
-	n.mu.RUnlock()
+	n.balanceMu.RUnlock()
 
 	if !isLeader {
 		return &pb.PrintReshardReply{

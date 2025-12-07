@@ -27,10 +27,10 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	txnID := fmt.Sprintf("2pc-%s-%d", clientID, timestamp)
 
 	// Check for duplicate
-	n.mu.RLock()
+	n.balanceMu.RLock()
 	lastReply, hasReply := n.clientLastReply[clientID]
 	lastTS, hasTS := n.clientLastTS[clientID]
-	n.mu.RUnlock()
+	n.balanceMu.RUnlock()
 
 	if hasReply && hasTS && timestamp <= lastTS {
 		log.Printf("Node %d: 2PC[%s]: Duplicate request - returning cached result", n.id, txnID)
@@ -48,12 +48,12 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	log.Printf("Node %d: 2PC[%s]: PHASE 1 - PREPARE (check locks and balances)", n.id, txnID)
 
 	// Step 1a: Check debit locally (lock + balance check, but DON'T execute)
-	n.mu.Lock()
+	n.balanceMu.Lock()
 
 	// Check if locks are available
 	senderLock, senderLocked := n.locks[tx.Sender]
 	if senderLocked && senderLock.clientID != clientID {
-		n.mu.Unlock()
+		n.balanceMu.Unlock()
 		log.Printf("Node %d: 2PC[%s]: ❌ PREPARE FAILED - sender item %d locked by %s",
 			n.id, txnID, tx.Sender, senderLock.clientID)
 		n.cacheResult(clientID, timestamp, false, "sender locked")
@@ -63,7 +63,7 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	// Check balance
 	senderBalance := n.balances[tx.Sender]
 	if senderBalance < tx.Amount {
-		n.mu.Unlock()
+		n.balanceMu.Unlock()
 		log.Printf("Node %d: 2PC[%s]: ❌ PREPARE FAILED - insufficient balance (have %d, need %d)",
 			n.id, txnID, senderBalance, tx.Amount)
 		n.cacheResult(clientID, timestamp, false, "insufficient balance")
@@ -72,7 +72,7 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 
 	log.Printf("Node %d: 2PC[%s]: ✅ Sender PREPARE OK - balance=%d, amount=%d",
 		n.id, txnID, senderBalance, tx.Amount)
-	n.mu.Unlock()
+	n.balanceMu.Unlock()
 
 	// Step 1b: Contact receiver cluster for PREPARE
 	log.Printf("Node %d: 2PC[%s]: Contacting receiver cluster %d leader %d for PREPARE",
@@ -164,8 +164,8 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 	log.Printf("Node %d: 2PC[%s]: Received PREPARE request for item %d: +%d",
 		n.id, txnID, tx.Receiver, tx.Amount)
 
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.balanceMu.Lock()
+	defer n.balanceMu.Unlock()
 
 	// Check if receiver item is locked
 	receiverLock, receiverLocked := n.locks[tx.Receiver]
@@ -201,8 +201,8 @@ func (n *Node) cacheResult(clientID string, timestamp int64, success bool, messa
 		result.Result = pb.ResultType_FAILED
 	}
 
-	n.mu.Lock()
+	n.balanceMu.Lock()
 	n.clientLastReply[clientID] = result
 	n.clientLastTS[clientID] = timestamp
-	n.mu.Unlock()
+	n.balanceMu.Unlock()
 }

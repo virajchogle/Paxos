@@ -247,6 +247,15 @@ func (m *ClientManager) processNextSet() {
 		return
 	}
 
+	// Flush state before processing the next test set
+	// This ensures each test starts with clean slate
+	if m.currentSet > 0 {
+		fmt.Println("\n🔄 Flushing system state before next test set...")
+		m.flushAllNodes()
+		// Wait for nodes to stabilize after flush
+		time.Sleep(2 * time.Second)
+	}
+
 	set := m.testSets[m.currentSet]
 	m.currentSet++
 
@@ -270,7 +279,7 @@ func (m *ClientManager) processNextSet() {
 	}
 
 	inactiveNodes := []int32{}
-	for nodeID := int32(1); nodeID <= 5; nodeID++ {
+	for nodeID := int32(1); nodeID <= 9; nodeID++ {
 		if !activeMap[nodeID] {
 			inactiveNodes = append(inactiveNodes, nodeID)
 		}
@@ -298,10 +307,11 @@ func (m *ClientManager) processNextSet() {
 		}
 	}
 
-	// Give activated nodes time to complete recovery and stabilize
+	// Give activated nodes time to elect leader and stabilize
+	// With fresh state (after flush), election should be fast
 	if len(set.ActiveNodes) > 0 {
-		fmt.Printf("⏳ Waiting for activated nodes to complete recovery and stabilize...\n")
-		time.Sleep(5 * time.Second)
+		fmt.Printf("⏳ Waiting for nodes to elect leader and stabilize...\n")
+		time.Sleep(2 * time.Second)
 	}
 
 	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
@@ -395,18 +405,92 @@ func (m *ClientManager) processNextSet() {
 	queueSize := len(m.pendingQueue)
 	m.mu.Unlock()
 
-	fmt.Printf("\n✅ Test Set %d completed! (%d successful, %d queued)\n",
+	fmt.Printf("\n✅ Test Set %d execution completed! (%d successful, %d queued)\n",
 		set.SetNumber, successCount, queueSize)
 
-	// After test set completes, check if we should retry queued transactions
-	// Only retry if we now have quorum (3+ active nodes)
-	if len(set.ActiveNodes) >= 3 && queueSize > 0 {
-		fmt.Printf("\n🔄 Quorum restored! Processing %d queued transactions...\n", queueSize)
-		m.retryQueuedTransactions()
+	// Immediately retry queued transactions in a loop until queue is empty or no progress
+	if queueSize > 0 {
+		fmt.Printf("\n🔄 Processing queued transactions...\n")
+		totalRetried := m.retryQueuedTransactionsUntilDone()
+		successCount += totalRetried
+
+		m.mu.Lock()
+		finalQueueSize := len(m.pendingQueue)
+		m.mu.Unlock()
+
+		if finalQueueSize > 0 {
+			fmt.Printf("⚠️  %d transactions could not be completed\n", finalQueueSize)
+		}
+	}
+
+	fmt.Printf("\n✅ Test Set %d final: %d successful\n", set.SetNumber, successCount)
+}
+
+// retryQueuedTransactionsUntilDone aggressively retries queued transactions until queue is empty or no progress
+// Returns total number of transactions that succeeded
+func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
+	totalSuccess := 0
+	round := 0
+
+	for {
+		round++
+		m.mu.Lock()
+		queueSize := len(m.pendingQueue)
+		if queueSize == 0 {
+			m.mu.Unlock()
+			if round > 1 {
+				fmt.Printf("✅ All queued transactions completed after %d rounds\n", round-1)
+			}
+			return totalSuccess
+		}
+
+		// Copy queue and clear it
+		queuedCmds := make([]utils.Command, len(m.pendingQueue))
+		copy(queuedCmds, m.pendingQueue)
+		m.pendingQueue = make([]utils.Command, 0)
+		m.mu.Unlock()
+
+		roundSuccess := 0
+		for _, cmd := range queuedCmds {
+			if cmd.Type != "transaction" {
+				continue // Only retry transactions
+			}
+
+			txn := cmd.Transaction
+			err := m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount)
+			if err == nil {
+				// Success!
+				senderCluster := m.getClusterForDataItem(txn.Sender)
+				receiverCluster := m.getClusterForDataItem(txn.Receiver)
+				if senderCluster == receiverCluster {
+					fmt.Printf("   ✅ Retry: %d → %d: %d units (Cluster %d)\n",
+						txn.Sender, txn.Receiver, txn.Amount, senderCluster)
+				} else {
+					fmt.Printf("   ✅ Retry: %d → %d: %d units (C%d→C%d cross-shard)\n",
+						txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster)
+				}
+				roundSuccess++
+			} else {
+				// Still failing - re-queue
+				m.mu.Lock()
+				m.pendingQueue = append(m.pendingQueue, cmd)
+				m.mu.Unlock()
+			}
+		}
+
+		totalSuccess += roundSuccess
+
+		// If no progress this round, give up
+		if roundSuccess == 0 {
+			fmt.Printf("⚠️  No progress in round %d, stopping retry loop\n", round)
+			return totalSuccess
+		}
+
+		// Otherwise continue to next round immediately
 	}
 }
 
-// retryQueuedTransactions processes all queued commands that failed due to no quorum
+// retryQueuedTransactions processes all queued commands once (manual retry command)
 func (m *ClientManager) retryQueuedTransactions() {
 	m.mu.Lock()
 	if len(m.pendingQueue) == 0 {
@@ -434,7 +518,7 @@ func (m *ClientManager) retryQueuedTransactions() {
 			successCount++
 		} else {
 			// Re-queue if still failing
-			fmt.Printf("   ⏸️  [%d/%d] %d → %d: %d units - Still no quorum, re-queued\n",
+			fmt.Printf("   ⏸️  [%d/%d] %d → %d: %d units - Still failing, re-queued\n",
 				i+1, len(queuedCmds), txn.Sender, txn.Receiver, txn.Amount)
 			m.mu.Lock()
 			m.pendingQueue = append(m.pendingQueue, cmd)
