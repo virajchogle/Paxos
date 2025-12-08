@@ -94,7 +94,7 @@ func (n *Node) StartLeaderElection() {
 		wg.Add(1)
 		go func(peerID int32, cli pb.PaxosNodeClient) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
 			defer cancel()
 			req := &pb.PrepareRequest{
 				Ballot: tentative.ToProto(),
@@ -111,7 +111,7 @@ func (n *Node) StartLeaderElection() {
 		close(promiseCh)
 	}()
 
-	timeout := time.After(1800 * time.Millisecond)
+	timeout := time.After(1000 * time.Millisecond)
 collectLoop:
 	for {
 		select {
@@ -140,6 +140,10 @@ collectLoop:
 
 	if !n.hasQuorum(promiseCount) {
 		log.Printf("Node %d: ✗ No quorum (%d/%d)", n.id, promiseCount, n.quorumSize())
+		// Reset timer to try election again after timeout
+		// This is correct Paxos behavior - keep trying to establish leadership
+		// when nodes come back online, we'll quickly form quorum
+		n.resetLeaderTimer()
 		return
 	}
 
@@ -186,7 +190,7 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	// Quick check without lock first
 	if reqBallot.Compare(n.promisedBallot) <= 0 {
 		n.paxosMu.RUnlock()
-		log.Printf("Node %d: Rejecting PREPARE - node is INACTIVE", n.id)
+		log.Printf("Node %d: Rejecting PREPARE %s - already promised to %s", n.id, reqBallot.String(), n.promisedBallot.String())
 		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
 	}
 	wasLeader := n.isLeader
@@ -340,7 +344,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 
 	for pid, client := range peers {
 		go func(peerID int32, c pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel()
 			_, err := c.NewView(ctx, newView)
 			if err != nil {
@@ -354,7 +358,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 
 	// Wait for responses (with timeout)
 	acceptedCount := 1 // Leader counts itself
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(1 * time.Second)
 	got := 0
 	for got < len(peers) {
 		select {
@@ -399,7 +403,7 @@ DONE:
 		// Send to all peers
 		for pid, cli := range peers {
 			go func(peerID int32, c pb.PaxosNodeClient, req *pb.CommitRequest) {
-				ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
 				defer cancel()
 				_, _ = c.Commit(ctx, req)
 			}(pid, cli, commitReq)

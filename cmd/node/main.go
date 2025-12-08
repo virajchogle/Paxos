@@ -55,10 +55,9 @@ func main() {
 	}
 	defer logFile.Close()
 
-	// Use a syncWriter that flushes after every write - write to BOTH file and stdout
-	sw := &syncWriter{w: io.MultiWriter(logFile, os.Stdout), f: logFile}
+	// Only write logs to file, not console (reduces I/O overhead)
+	sw := &syncWriter{w: logFile, f: logFile}
 
-	// Redirect standard logger to file AND stdout with immediate flushing
 	log.SetOutput(sw)
 
 	// Also redirect stderr to log file to capture panics

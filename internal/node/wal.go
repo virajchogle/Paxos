@@ -4,30 +4,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 
 	"paxos-banking/internal/types"
+
+	"github.com/cockroachdb/pebble"
 )
 
-// ============================================================================
-// PHASE 5: WRITE-AHEAD LOG (WAL) FOR 2PC ROLLBACK
-// ============================================================================
-
-// createWALEntry creates a new WAL entry for a transaction
-// This is called before executing the transaction
 func (n *Node) createWALEntry(txnID string, seqNum int32) *types.WALEntry {
 	n.walMu.Lock()
 	defer n.walMu.Unlock()
 
 	entry := types.NewWALEntry(txnID, seqNum)
 	n.wal[txnID] = entry
-
-	log.Printf("Node %d: 📝 Created WAL entry for txn %s (seq %d)", n.id, txnID, seqNum)
 	return entry
 }
 
-// writeToWAL logs an operation to the WAL before executing it
-// This allows us to undo the operation if needed (2PC rollback)
 func (n *Node) writeToWAL(txnID string, opType types.OperationType, dataItem, oldValue, newValue int32) error {
 	n.walMu.Lock()
 	defer n.walMu.Unlock()
@@ -38,16 +29,9 @@ func (n *Node) writeToWAL(txnID string, opType types.OperationType, dataItem, ol
 	}
 
 	entry.AddOperation(opType, dataItem, oldValue, newValue)
-
-	log.Printf("Node %d: 📝 WAL[%s]: %s item %d: %d -> %d",
-		n.id, txnID, opType, dataItem, oldValue, newValue)
-
-	// Persist WAL to disk
-	return n.persistWAL()
+	return n.persistWALEntry(txnID, entry)
 }
 
-// commitWAL marks a WAL entry as committed
-// This is called after a transaction successfully commits
 func (n *Node) commitWAL(txnID string) error {
 	n.walMu.Lock()
 	defer n.walMu.Unlock()
@@ -58,21 +42,14 @@ func (n *Node) commitWAL(txnID string) error {
 	}
 
 	entry.Status = types.WALStatusCommitted
-	log.Printf("Node %d: ✅ WAL[%s]: Committed", n.id, txnID)
-
-	// Persist updated status
-	if err := n.persistWAL(); err != nil {
+	if err := n.persistWALEntry(txnID, entry); err != nil {
 		return err
 	}
 
-	// Clean up committed entries (can be done async)
 	go n.cleanupCommittedWAL(txnID)
-
 	return nil
 }
 
-// abortWAL rolls back a transaction by undoing all its operations
-// This is the core rollback mechanism for 2PC
 func (n *Node) abortWAL(txnID string) error {
 	n.walMu.Lock()
 	entry, exists := n.wal[txnID]
@@ -80,156 +57,153 @@ func (n *Node) abortWAL(txnID string) error {
 		n.walMu.Unlock()
 		return fmt.Errorf("WAL entry not found for transaction %s", txnID)
 	}
-
 	entry.Status = types.WALStatusAborting
 	n.walMu.Unlock()
 
-	log.Printf("Node %d: 🔄 WAL[%s]: Aborting - rolling back %d operations",
-		n.id, txnID, len(entry.Operations))
-
-	// Undo operations in REVERSE order (use balanceMu)
 	n.balanceMu.Lock()
 	for i := len(entry.Operations) - 1; i >= 0; i-- {
 		op := entry.Operations[i]
-
-		// Restore old value
 		n.balances[op.DataItem] = op.OldValue
-
-		log.Printf("Node %d: ↩️  WAL[%s]: Undo %s item %d: %d -> %d (restored)",
-			n.id, txnID, op.Type, op.DataItem, op.NewValue, op.OldValue)
 	}
 	n.balanceMu.Unlock()
 
-	// Save rolled-back database state
 	if err := n.saveDatabase(); err != nil {
-		log.Printf("Node %d: ⚠️  Warning - failed to save database after rollback: %v", n.id, err)
+		log.Printf("Node %d: Failed to save database after rollback: %v", n.id, err)
 	}
 
-	// Mark as aborted
 	n.walMu.Lock()
 	entry.Status = types.WALStatusAborted
 	n.walMu.Unlock()
 
-	log.Printf("Node %d: ✅ WAL[%s]: Aborted successfully", n.id, txnID)
-
-	// Persist updated status
-	if err := n.persistWAL(); err != nil {
+	if err := n.persistWALEntry(txnID, entry); err != nil {
 		return err
 	}
 
-	// Clean up aborted entry
 	go n.cleanupAbortedWAL(txnID)
-
 	return nil
 }
 
-// persistWAL writes the current WAL state to disk
-// This ensures WAL survives node crashes
 func (n *Node) persistWAL() error {
-	// Called with walMu already locked
-
-	data, err := json.MarshalIndent(n.wal, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal WAL: %w", err)
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
 	}
 
-	if err := os.WriteFile(n.walFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write WAL file: %w", err)
+	batch := n.pebbleDB.NewBatch()
+	for txnID, entry := range n.wal {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("failed to marshal WAL entry %s: %w", txnID, err)
+		}
+
+		key := []byte("wal_" + txnID)
+		if err := batch.Set(key, data, pebble.NoSync); err != nil {
+			return fmt.Errorf("failed to write WAL entry %s: %w", txnID, err)
+		}
 	}
 
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("failed to commit WAL batch: %w", err)
+	}
 	return nil
 }
 
-// loadWAL loads the WAL from disk (for crash recovery)
+func (n *Node) persistWALEntry(txnID string, entry *types.WALEntry) error {
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal WAL entry: %w", err)
+	}
+
+	key := []byte("wal_" + txnID)
+	if err := n.pebbleDB.Set(key, data, pebble.NoSync); err != nil {
+		return fmt.Errorf("failed to write WAL entry: %w", err)
+	}
+	return nil
+}
+
 func (n *Node) loadWAL() error {
 	n.walMu.Lock()
 	defer n.walMu.Unlock()
 
-	// Check if WAL file exists
-	if _, err := os.Stat(n.walFile); os.IsNotExist(err) {
-		log.Printf("Node %d: No existing WAL file found (fresh start)", n.id)
+	if n.pebbleDB == nil {
 		return nil
 	}
 
-	data, err := os.ReadFile(n.walFile)
+	iter, err := n.pebbleDB.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("wal_"),
+		UpperBound: []byte("wal`"),
+	})
 	if err != nil {
-		return fmt.Errorf("failed to read WAL file: %w", err)
+		return fmt.Errorf("failed to create WAL iterator: %w", err)
 	}
+	defer iter.Close()
 
-	if len(data) == 0 {
-		log.Printf("Node %d: WAL file is empty", n.id)
-		return nil
-	}
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := string(iter.Key())
+		txnID := key[4:]
 
-	if err := json.Unmarshal(data, &n.wal); err != nil {
-		return fmt.Errorf("failed to unmarshal WAL: %w", err)
-	}
+		var entry types.WALEntry
+		if err := json.Unmarshal(iter.Value(), &entry); err != nil {
+			log.Printf("Node %d: Failed to unmarshal WAL entry %s: %v", n.id, txnID, err)
+			continue
+		}
 
-	log.Printf("Node %d: 📖 Loaded %d WAL entries from disk", n.id, len(n.wal))
+		n.wal[txnID] = &entry
 
-	// Check for any uncommitted transactions that need recovery
-	for txnID, entry := range n.wal {
 		if entry.Status == types.WALStatusPreparing || entry.Status == types.WALStatusPrepared {
-			log.Printf("Node %d: ⚠️  Found uncommitted transaction %s in WAL (status: %s) - may need recovery",
-				n.id, txnID, entry.Status)
+			log.Printf("Node %d: Uncommitted transaction %s in WAL (status: %s)", n.id, txnID, entry.Status)
 		}
 	}
 
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("WAL iteration error: %w", err)
+	}
 	return nil
 }
 
-// cleanupCommittedWAL removes committed WAL entries after a delay
 func (n *Node) cleanupCommittedWAL(txnID string) {
-	// Wait a bit before cleanup (in case we need to replay)
-	// time.Sleep(1 * time.Second)
-
 	n.walMu.Lock()
 	defer n.walMu.Unlock()
 
 	if entry, exists := n.wal[txnID]; exists && entry.Status == types.WALStatusCommitted {
 		delete(n.wal, txnID)
-		log.Printf("Node %d: 🗑️  WAL[%s]: Cleaned up committed entry", n.id, txnID)
-
-		// Persist cleanup
-		if err := n.persistWAL(); err != nil {
-			log.Printf("Node %d: ⚠️  Warning - failed to persist WAL cleanup: %v", n.id, err)
+		if n.pebbleDB != nil {
+			key := []byte("wal_" + txnID)
+			if err := n.pebbleDB.Delete(key, pebble.NoSync); err != nil {
+				log.Printf("Node %d: Failed to delete WAL entry: %v", n.id, err)
+			}
 		}
 	}
 }
 
-// cleanupAbortedWAL removes aborted WAL entries after a delay
 func (n *Node) cleanupAbortedWAL(txnID string) {
-	// Wait a bit before cleanup
-	// time.Sleep(1 * time.Second)
-
 	n.walMu.Lock()
 	defer n.walMu.Unlock()
 
 	if entry, exists := n.wal[txnID]; exists && entry.Status == types.WALStatusAborted {
 		delete(n.wal, txnID)
-		log.Printf("Node %d: 🗑️  WAL[%s]: Cleaned up aborted entry", n.id, txnID)
-
-		// Persist cleanup
-		if err := n.persistWAL(); err != nil {
-			log.Printf("Node %d: ⚠️  Warning - failed to persist WAL cleanup: %v", n.id, err)
+		if n.pebbleDB != nil {
+			key := []byte("wal_" + txnID)
+			if err := n.pebbleDB.Delete(key, pebble.NoSync); err != nil {
+				log.Printf("Node %d: Failed to delete WAL entry: %v", n.id, err)
+			}
 		}
 	}
 }
 
-// getWALEntry retrieves a WAL entry by transaction ID
 func (n *Node) getWALEntry(txnID string) (*types.WALEntry, bool) {
 	n.walMu.RLock()
 	defer n.walMu.RUnlock()
-
 	entry, exists := n.wal[txnID]
 	return entry, exists
 }
 
-// getWALStatus returns the status of a WAL entry
 func (n *Node) getWALStatus(txnID string) (types.WALStatus, bool) {
 	n.walMu.RLock()
 	defer n.walMu.RUnlock()
-
 	if entry, exists := n.wal[txnID]; exists {
 		return entry.Status, true
 	}

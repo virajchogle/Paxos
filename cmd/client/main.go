@@ -132,7 +132,7 @@ func (m *ClientManager) setNodeActive(nodeID int32, active bool) error {
 
 	// Retry up to 3 times with increasing timeout
 	maxRetries := 3
-	baseTimeout := 15 * time.Second
+	baseTimeout := 2 * time.Second
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		timeout := baseTimeout * time.Duration(attempt)
@@ -252,8 +252,9 @@ func (m *ClientManager) processNextSet() {
 	if m.currentSet > 0 {
 		fmt.Println("\n🔄 Flushing system state before next test set...")
 		m.flushAllNodes()
-		// Wait for nodes to stabilize after flush
-		time.Sleep(2 * time.Second)
+		// Short pause to ensure flush completes
+		// (timer is stopped after flush, so no need for long wait)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	set := m.testSets[m.currentSet]
@@ -296,7 +297,7 @@ func (m *ClientManager) processNextSet() {
 
 		// Give time for remaining nodes to detect leader failure and elect new leader
 		fmt.Printf("⏳ Waiting for new leader election...\n")
-		time.Sleep(3 * time.Second)
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	// Ensure active nodes are active (in case they were previously inactive)
@@ -311,7 +312,7 @@ func (m *ClientManager) processNextSet() {
 	// With fresh state (after flush), election should be fast
 	if len(set.ActiveNodes) > 0 {
 		fmt.Printf("⏳ Waiting for nodes to elect leader and stabilize...\n")
-		time.Sleep(2 * time.Second)
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
@@ -551,8 +552,8 @@ func (m *ClientManager) triggerLeaderFailure() {
 	}
 
 	// Wait for new leader election
-	fmt.Printf("   ⏳ Waiting for new leader election (3 seconds)...\n")
-	time.Sleep(3 * time.Second)
+	fmt.Printf("   ⏳ Waiting for new leader election...\n")
+	time.Sleep(1 * time.Second)
 
 	// Try to discover the new leader
 	m.discoverNewLeader()
@@ -1159,7 +1160,7 @@ func (m *ClientManager) printReshard() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	resp, err := leaderClient.PrintReshard(ctx, &pb.PrintReshardRequest{
@@ -1254,7 +1255,7 @@ func (m *ClientManager) flushAllNodes() {
 	m.mu.Unlock()
 
 	fmt.Println("Waiting for nodes to stabilize...")
-	time.Sleep(2 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	fmt.Println()
 }
 

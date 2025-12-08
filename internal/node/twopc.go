@@ -85,7 +85,7 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 		return false, fmt.Errorf("receiver unreachable: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	prepareReq := &pb.TwoPCPrepareRequest{
@@ -130,7 +130,7 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	log.Printf("Node %d: 2PC[%s]: ✅ Debit executed", n.id, txnID)
 
 	// Step 2b: Execute credit in receiver cluster via Paxos
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel2()
 
 	creditReply, err := receiverClient.SubmitTransaction(ctx2, debitReq)

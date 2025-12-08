@@ -34,36 +34,43 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 	}
 
 	// 🎯 Bootstrap: If system not initialized, handle first transaction
+	bootstrapElectionStarted := false
 	if !systemInit {
 		n.paxosMu.Lock()
 		if !n.systemInitialized { // Double-check under lock
 			n.systemInitialized = true
 			n.paxosMu.Unlock()
 
-			if nodeID == 1 {
-				// Node 1: Start leader election
+			if nodeID == 1 || nodeID == 4 || nodeID == 7 {
+				// Expected leader nodes (n1, n4, n7): Start leader election immediately
 				log.Printf("Node %d: 🚀 First transaction received - bootstrapping system and starting leader election", nodeID)
-				// Start the leader timer which will trigger election
-				n.resetLeaderTimer()
-				// Give a small head start to ensure node 1 starts the election
-				time.Sleep(100 * time.Millisecond)
+				// Start election directly - no need for timer since we're the expected leader
 				go n.StartLeaderElection()
+				bootstrapElectionStarted = true
 			} else {
-				// Other nodes: Forward to node 1 to trigger bootstrap
-				log.Printf("Node %d: 🔄 First transaction received - forwarding to node 1 to bootstrap system", nodeID)
-				node1Client, hasNode1 := n.peerClients[1] // Read-only after init
+				// Other nodes: Forward to expected leader (n1, n4, or n7) to trigger bootstrap
+				log.Printf("Node %d: 🔄 First transaction received - forwarding to expected leader to bootstrap system", nodeID)
 
-				if hasNode1 {
-					// Forward to node 1
+				// Determine which expected leader to forward to based on cluster
+				expectedLeader := int32(1) // Default to n1
+				if n.clusterID == 2 {
+					expectedLeader = 4
+				} else if n.clusterID == 3 {
+					expectedLeader = 7
+				}
+
+				leaderClient, hasLeader := n.peerClients[expectedLeader] // Read-only after init
+				if hasLeader {
+					// Forward to expected leader
 					ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					resp, err := node1Client.SubmitTransaction(ctx2, req)
+					resp, err := leaderClient.SubmitTransaction(ctx2, req)
 					if err == nil {
 						return resp, nil
 					}
-					log.Printf("Node %d: Failed to forward to node 1: %v - will wait for election", nodeID, err)
+					log.Printf("Node %d: Failed to forward to node %d: %v - will wait for election", nodeID, expectedLeader, err)
 				} else {
-					log.Printf("Node %d: Not connected to node 1 - will wait for election", nodeID)
+					log.Printf("Node %d: Not connected to node %d - will wait for election", nodeID, expectedLeader)
 				}
 			}
 		} else {
@@ -109,10 +116,13 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 		}
 
 		// No leader known - start election and wait for it to complete
-		go n.StartLeaderElection()
+		// (unless we already started one during bootstrap)
+		if !bootstrapElectionStarted {
+			go n.StartLeaderElection()
+		}
 
 		// Wait up to 3 seconds for a leader to be elected
-		maxWait := 3000 * time.Millisecond
+		maxWait := 1000 * time.Millisecond
 		pollInterval := 100 * time.Millisecond
 		deadline := time.Now().Add(maxWait)
 
@@ -176,7 +186,7 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 				client, exists := n.peerClients[currentLeaderID] // Read-only, no lock needed
 
 				if exists {
-					ctx3, cancel3 := context.WithTimeout(context.Background(), 3*time.Second)
+					ctx3, cancel3 := context.WithTimeout(context.Background(), 1*time.Second)
 					defer cancel3()
 					resp2, err2 := client.SubmitTransaction(ctx3, req)
 					if err2 == nil {
@@ -354,7 +364,7 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 		wg.Add(1)
 		go func(peerID int32, c pb.PaxosNodeClient) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			resp, err := c.Accept(ctx, acceptReq)
 			if err == nil && resp.Success {
@@ -388,7 +398,7 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 	}
 	for pid, cli := range peers {
 		go func(peerID int32, c pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			_, _ = c.Commit(ctx, commitReq)
 		}(pid, cli)
@@ -499,7 +509,7 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 	respCh := make(chan respT, len(peers))
 	for pid, client := range peers {
 		go func(pid int32, cli pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			r, err := cli.Accept(ctx, acceptReq)
 			if err != nil {
@@ -511,7 +521,7 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 	}
 
 	acceptedCount := 1 // leader already accepted
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(1 * time.Second)
 	got := 0
 	for got < len(peers) {
 		select {
@@ -560,7 +570,7 @@ QUORUM:
 	}
 	for pid, cli := range peers {
 		go func(peerID int32, c pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			_, _ = c.Commit(ctx, commitReq)
 			_ = peerID
@@ -614,7 +624,15 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 	// Update promised ballot and leader ID
 	n.promisedBallot = reqBallot
 	n.leaderID = reqBallot.NodeID
+	isLeader := n.isLeader
 	n.paxosMu.Unlock()
+
+	// Reset follower timer IMMEDIATELY on leader activity (ACCEPT is a message from leader)
+	// CRITICAL: Do this BEFORE processing to prevent timer from firing during execution
+	// MUST be called without holding paxosMu to avoid deadlock
+	if !isLeader {
+		n.resetLeaderTimer()
+	}
 
 	// Store in log (use logMu)
 	if req.SequenceNumber > 0 {
@@ -638,10 +656,6 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 		log.Printf("Node %d: ✓ ACCEPTED seq=%d", n.id, req.SequenceNumber)
 	}
 
-	// reset follower timer on leader activity
-	// MUST be called without holding n.mu to avoid deadlock
-	n.resetLeaderTimer()
-
 	return &pb.AcceptedReply{Success: true, Ballot: req.Ballot, SequenceNumber: req.SequenceNumber, NodeId: n.id}, nil
 }
 
@@ -660,6 +674,13 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 	if !active {
 		log.Printf("Node %d: ⚠️  COMMIT REJECTED - node is inactive", n.id)
 		return &pb.CommitReply{Success: false}, nil
+	}
+
+	// Reset follower timer IMMEDIATELY on leader activity (COMMIT is a message from leader)
+	// CRITICAL: Do this BEFORE processing commit to prevent timer from firing during execution
+	// This ensures followers don't timeout while leader is actively processing transactions
+	if !isLeader {
+		n.resetLeaderTimer()
 	}
 
 	// Log and apply commit (skip seq=0 heartbeats)
@@ -1212,20 +1233,16 @@ func (n *Node) SetActive(ctx context.Context, req *pb.SetActiveRequest) (*pb.Set
 		// Node is now active (either newly activated or already was active)
 		if wasActive {
 			log.Printf("Node %d: ✅ Node already ACTIVE (leader=%d)", n.id, currentLeaderID)
-			// After flush, leader election might be needed even for already-active nodes
-			// Check if we need to trigger election (e.g., after flush reset leaderID to -1)
-			if !wasLeader && currentLeaderID <= 0 {
-				log.Printf("Node %d: Already active but no known leader - starting election", n.id)
-				go n.StartLeaderElection()
-			}
+			// Don't trigger election here - wait for first transaction
+			// Elections should only be triggered by:
+			// 1. Transaction requests (when no leader is known)
+			// 2. Leader timeout
 		} else {
 			log.Printf("Node %d: ✅ Node set to ACTIVE (was inactive)", n.id)
 
-			// Start election if no known leader (checkForGaps will handle gap detection)
-			if !wasLeader && currentLeaderID <= 0 {
-				log.Printf("Node %d: No known leader - starting election", n.id)
-				go n.StartLeaderElection()
-			} else if !wasLeader && currentLeaderID > 0 {
+			// Don't trigger election here - wait for first transaction
+			// The client will send to n1/n4/n7 first, and they will become leaders
+			if !wasLeader && currentLeaderID > 0 {
 				log.Printf("Node %d: Believes leader is %d", n.id, currentLeaderID)
 			}
 		}

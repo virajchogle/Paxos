@@ -65,6 +65,13 @@ type Node struct {
 	// Database (protected by balanceMu) - changed from client IDs to data item IDs
 	balances map[int32]int32 // dataItemID -> balance
 
+	// 📸 Checkpointing (protected by checkpointMu)
+	checkpointMu        sync.RWMutex    // Protects checkpoint state
+	lastCheckpointSeq   int32           // Last sequence number checkpointed
+	checkpointedBalance map[int32]int32 // Snapshot of balances at checkpoint
+	checkpointInterval  int32           // Checkpoint every N executed transactions
+	modifiedItems       map[int32]bool  // Track which items have been modified
+
 	// Locking mechanism (Phase 2) - has own lockMu
 	lockMu      sync.Mutex      // Separate mutex for lock operations
 	locks       map[int32]*Lock // dataItemID -> Lock
@@ -143,40 +150,42 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 	clusterID := int32(cfg.GetClusterForNode(int(id)))
 
 	n := &Node{
-		id:                id,
-		clusterID:         clusterID,
-		address:           cfg.GetNodeAddress(int(id)),
-		config:            cfg,
-		isLeader:          false,
-		currentBallot:     types.NewBallot(0, id),
-		promisedBallot:    types.NewBallot(0, 0),
-		leaderID:          -1,
-		nextSeqNum:        1,
-		lastExecuted:      0,
-		log:               make(map[int32]*types.LogEntry),
-		newViewLog:        make([]*pb.NewViewRequest, 0),
-		clientLastReply:   make(map[string]*pb.TransactionReply),
-		clientLastTS:      make(map[string]int64),
-		balances:          make(map[int32]int32),                   // Changed to int32 -> int32
-		locks:             make(map[int32]*Lock),                   // Initialize lock table
-		lockTimeout:       100 * time.Millisecond,                  // Was 2s - now 100ms for performance
-		wal:               make(map[string]*types.WALEntry),        // Initialize WAL (Phase 5)
-		walFile:           fmt.Sprintf("data/node%d_wal.json", id), // WAL persistence file
-		peerClients:       make(map[int32]pb.PaxosNodeClient),
-		peerConns:         make(map[int32]*grpc.ClientConn),
-		allClusterClients: make(map[int32]pb.PaxosNodeClient),
-		allClusterConns:   make(map[int32]*grpc.ClientConn),
-		timerDuration:     timerDuration,
-		dbFilePath:        fmt.Sprintf("data/node%d_db.json", id),
-		prepareCooldown:   time.Duration(5+rand.Intn(10)) * time.Millisecond, // Was 50-100ms - now 5-15ms for performance
-		heartbeatInterval: 10 * time.Millisecond,                             // Was 50ms - now 10ms for performance
-		heartbeatStop:     nil,
-		stopChan:          make(chan struct{}),
-		isActive:          true,
-		systemInitialized: false,
-		startTime:         time.Now(),                              // Phase 7: Track uptime
-		accessTracker:     redistribution.NewAccessTracker(100000), // Phase 9: Access pattern tracking
-		migrationState:    nil,                                     // Phase 9: Initialized on first migration
+		id:                 id,
+		clusterID:          clusterID,
+		address:            cfg.GetNodeAddress(int(id)),
+		config:             cfg,
+		isLeader:           false,
+		currentBallot:      types.NewBallot(0, id),
+		promisedBallot:     types.NewBallot(0, 0),
+		leaderID:           -1,
+		nextSeqNum:         1,
+		lastExecuted:       0,
+		log:                make(map[int32]*types.LogEntry),
+		newViewLog:         make([]*pb.NewViewRequest, 0),
+		clientLastReply:    make(map[string]*pb.TransactionReply),
+		clientLastTS:       make(map[string]int64),
+		balances:           make(map[int32]int32),                   // Changed to int32 -> int32
+		checkpointInterval: 100,                                     // Checkpoint every 100 transactions
+		modifiedItems:      make(map[int32]bool),                    // Track modified items
+		locks:              make(map[int32]*Lock),                   // Initialize lock table
+		lockTimeout:        100 * time.Millisecond,                  // Was 2s - now 100ms for performance
+		wal:                make(map[string]*types.WALEntry),        // Initialize WAL (Phase 5)
+		walFile:            fmt.Sprintf("data/node%d_wal.json", id), // WAL persistence file
+		peerClients:        make(map[int32]pb.PaxosNodeClient),
+		peerConns:          make(map[int32]*grpc.ClientConn),
+		allClusterClients:  make(map[int32]pb.PaxosNodeClient),
+		allClusterConns:    make(map[int32]*grpc.ClientConn),
+		timerDuration:      timerDuration,
+		dbFilePath:         fmt.Sprintf("data/node%d_db.json", id),
+		prepareCooldown:    time.Duration(5+rand.Intn(10)) * time.Millisecond, // Was 50-100ms - now 5-15ms for performance
+		heartbeatInterval:  10 * time.Millisecond,                             // Was 50ms - now 10ms for performance
+		heartbeatStop:      nil,
+		stopChan:           make(chan struct{}),
+		isActive:           true,
+		systemInitialized:  false,
+		startTime:          time.Now(),                              // Phase 7: Track uptime
+		accessTracker:      redistribution.NewAccessTracker(100000), // Phase 9: Access pattern tracking
+		migrationState:     nil,                                     // Phase 9: Initialized on first migration
 	}
 
 	// Open PebbleDB for persistent storage
@@ -257,8 +266,8 @@ func (n *Node) Start() error {
 	// Start periodic gap detection
 	go n.startGapDetection()
 
-	// Don't start leader timer on startup - wait for first transaction
-	// n.resetLeaderTimer()
+	// Start the persistent leader timer goroutine
+	n.startLeaderTimer()
 
 	log.Printf("Node %d: Ready (standby mode - waiting for transaction)", n.id)
 	return nil
@@ -310,7 +319,7 @@ func (n *Node) connectToPeers() error {
 		}
 
 		addr := n.config.GetNodeAddress(nodeID)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second) // Increased from 500ms
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 		cancel()
 		if err != nil {
@@ -426,35 +435,55 @@ func (n *Node) hasQuorum(count int) bool {
 // Timers & heartbeat helpers
 //
 
+// startLeaderTimer starts the persistent leader timeout timer goroutine
+// This should be called ONCE during node initialization
+func (n *Node) startLeaderTimer() {
+	n.timerMu.Lock()
+	n.leaderTimer = time.NewTimer(n.timerDuration)
+	n.timerMu.Unlock()
+
+	go func() {
+		for {
+			<-n.leaderTimer.C
+
+			// Check if we should start election
+			n.paxosMu.RLock()
+			isLeader := n.isLeader
+			active := n.isActive
+			n.paxosMu.RUnlock()
+
+			if !isLeader && active {
+				log.Printf("Node %d: ⏰ Leader timeout - starting election", n.id)
+				go n.StartLeaderElection()
+			}
+
+			// IMPORTANT: Do NOT reset timer here!
+			// The timer will be reset by:
+			// 1. Message handlers (ACCEPT, COMMIT, NEW-VIEW) when receiving leader activity
+			// 2. After becoming leader/inactive (timer will be stopped)
+			// This goroutine just consumes timer events and triggers elections
+		}
+	}()
+}
+
+// resetLeaderTimer resets the leader timeout timer
+// This is called when receiving messages from the leader
 func (n *Node) resetLeaderTimer() {
 	n.timerMu.Lock()
 	defer n.timerMu.Unlock()
 
-	// stop existing timer safely
 	if n.leaderTimer != nil {
+		// Stop and drain the timer
 		if !n.leaderTimer.Stop() {
+			// Timer already fired, drain the channel
 			select {
 			case <-n.leaderTimer.C:
 			default:
 			}
 		}
+		// Reset the timer - this is the idiomatic Go way
+		n.leaderTimer.Reset(n.timerDuration)
 	}
-
-	// create new timer
-	n.leaderTimer = time.NewTimer(n.timerDuration)
-
-	go func() {
-		<-n.leaderTimer.C
-		n.paxosMu.RLock()
-		isLeader := n.isLeader
-		active := n.isActive
-		n.paxosMu.RUnlock()
-
-		if !isLeader && active {
-			log.Printf("Node %d: ⏰ Leader timeout - starting election", n.id)
-			go n.StartLeaderElection()
-		}
-	}()
 }
 
 func (n *Node) startHeartbeat() {
@@ -712,7 +741,7 @@ func (n *Node) Close() error {
 }
 
 func (n *Node) startGapDetection() {
-	ticker := time.NewTicker(2 * time.Second) // ✅ Reduced from 10s to 2s
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -839,15 +868,25 @@ func (n *Node) requestRecoveryFromLeader(leaderID int32) {
 				// Got the entry! Add it to our log
 				log.Printf("Node %d: ✅ Received missing seq %d from node %d", n.id, seq, peerID)
 
-				// Convert to AcceptRequest and process it
-				acceptReq := &pb.AcceptRequest{
-					Ballot:         resp.Entry.Ballot,
-					SequenceNumber: resp.Entry.SequenceNumber,
-					Request:        resp.Entry.Request,
-					IsNoop:         resp.Entry.IsNoop,
-				}
+				// Directly insert into log bypassing ballot check
+				// This is safe because the entry is already committed on other nodes
+				ballot := types.BallotFromProto(resp.Entry.Ballot)
+				ent := types.NewLogEntry(ballot, resp.Entry.SequenceNumber, resp.Entry.Request, resp.Entry.IsNoop)
+				ent.Status = "A" // Mark as accepted
 
-				n.Accept(context.Background(), acceptReq)
+				n.logMu.Lock()
+				if existing, ok := n.log[resp.Entry.SequenceNumber]; ok {
+					// Only replace if the recovered entry has a higher ballot
+					existingBallot := existing.Ballot
+					if ballot.GreaterThan(existingBallot) || ballot.Equal(existingBallot) {
+						n.log[resp.Entry.SequenceNumber] = ent
+						log.Printf("Node %d: 📝 Filled gap seq=%d with ballot=%s", n.id, resp.Entry.SequenceNumber, ballot.String())
+					}
+				} else {
+					n.log[resp.Entry.SequenceNumber] = ent
+					log.Printf("Node %d: 📝 Filled gap seq=%d with ballot=%s", n.id, resp.Entry.SequenceNumber, ballot.String())
+				}
+				n.logMu.Unlock()
 
 				// Also commit and try to execute it
 				commitReq := &pb.CommitRequest{
@@ -1073,18 +1112,36 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 	n.startTime = time.Now()
 	n.perfMu.Unlock()
 
-	log.Printf("Node %d: ✅ State flushed successfully", n.id)
-
-	// Reset leader timeout timer to prevent race conditions during election
+	// Stop leader timer during flush
+	// This prevents elections during the flush->SetActive->first-transaction window
+	n.timerMu.Lock()
 	if n.leaderTimer != nil {
 		n.leaderTimer.Stop()
-		// Give longer timeout after FLUSH to allow clean election
-		n.leaderTimer = time.NewTimer(2 * time.Second)
+		// Drain the channel if timer already fired
+		select {
+		case <-n.leaderTimer.C:
+		default:
+		}
 	}
+	n.timerMu.Unlock()
 
-	// DON'T trigger election here - let SetActive handle it
-	// Problem: if expected leader is inactive, election won't start
-	// Better to let each node decide when it becomes active via SetActive
+	// Stop the leader timer during flush
+	n.timerMu.Lock()
+	if n.leaderTimer != nil {
+		n.leaderTimer.Stop()
+		// Drain the channel if timer already fired
+		select {
+		case <-n.leaderTimer.C:
+		default:
+		}
+	}
+	n.timerMu.Unlock()
+
+	log.Printf("Node %d: ✅ State flushed successfully", n.id)
+
+	// DON'T trigger election here - let first transaction trigger it
+	// This ensures n1/n4/n7 become leaders as designed
+	// First transaction will call resetLeaderTimer() to restart the timer
 
 	return &pb.FlushStateReply{
 		Success: true,
