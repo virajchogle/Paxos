@@ -7,11 +7,12 @@
 package proto
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -640,6 +641,7 @@ type AcceptRequest struct {
 	SequenceNumber int32                  `protobuf:"varint,2,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	Request        *TransactionRequest    `protobuf:"bytes,3,opt,name=request,proto3" json:"request,omitempty"`
 	IsNoop         bool                   `protobuf:"varint,4,opt,name=is_noop,json=isNoop,proto3" json:"is_noop,omitempty"`
+	Phase          string                 `protobuf:"bytes,5,opt,name=phase,proto3" json:"phase,omitempty"` // 2PC phase
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -700,6 +702,13 @@ func (x *AcceptRequest) GetIsNoop() bool {
 		return x.IsNoop
 	}
 	return false
+}
+
+func (x *AcceptRequest) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
 }
 
 type AcceptedReply struct {
@@ -777,6 +786,7 @@ type CommitRequest struct {
 	SequenceNumber int32                  `protobuf:"varint,2,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	Request        *TransactionRequest    `protobuf:"bytes,3,opt,name=request,proto3" json:"request,omitempty"`
 	IsNoop         bool                   `protobuf:"varint,4,opt,name=is_noop,json=isNoop,proto3" json:"is_noop,omitempty"`
+	Phase          string                 `protobuf:"bytes,5,opt,name=phase,proto3" json:"phase,omitempty"` // 2PC phase
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -837,6 +847,13 @@ func (x *CommitRequest) GetIsNoop() bool {
 		return x.IsNoop
 	}
 	return false
+}
+
+func (x *CommitRequest) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
 }
 
 type CommitReply struct {

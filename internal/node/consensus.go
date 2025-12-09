@@ -92,6 +92,7 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 
 	// if not leader, forward to leader if known
 	if !isLeader {
+		// leaderID > 0 means we know a leader (leaderID = -1 means uninitialized, 0 means no leader)
 		if leaderID > 0 && leaderID != n.id {
 			// No need for lock here - peerClients is read-only after initialization
 			client, ok := n.peerClients[leaderID]
@@ -269,6 +270,15 @@ func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*
 		}, nil
 	}
 
+	// Trigger election if no leader (for bootstrap)
+	n.paxosMu.RLock()
+	hasLeader := n.isLeader || n.leaderID > 0
+	n.paxosMu.RUnlock()
+
+	if !hasLeader {
+		go n.StartLeaderElection()
+	}
+
 	// Read balance from local replica (use balanceMu)
 	n.balanceMu.RLock()
 	balance, exists := n.balances[dataItemID]
@@ -379,10 +389,23 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 	quorum := (len(peers) + 1 + 1) / 2
 
 	if acceptedCount < quorum {
-		log.Printf("Node %d: ❌ No quorum for seq %d (accepted=%d, need=%d)", n.id, seq, acceptedCount, quorum)
+		log.Printf("Node %d: ❌ No quorum for seq %d (accepted=%d, need=%d) - removing from log", n.id, seq, acceptedCount, quorum)
+
+		// CRITICAL: Remove entry from log immediately
+		// Rationale:
+		// - Client expects accurate feedback
+		// - If we keep entry, NEW-VIEW might commit it later
+		// - Client already received FAILED, but transaction would succeed
+		// - This creates inconsistency between client state and cluster state
+		// - Better to fail cleanly and let client retry if needed
+
+		n.logMu.Lock()
+		delete(n.log, seq)
+		n.logMu.Unlock()
+
 		return &pb.TransactionReply{
 			Success: false,
-			Message: "No quorum",
+			Message: "No quorum - transaction aborted",
 			Result:  pb.ResultType_FAILED,
 		}, nil
 	}
@@ -636,9 +659,19 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 
 	// Store in log (use logMu)
 	if req.SequenceNumber > 0 {
-		log.Printf("Node %d: Received ACCEPT seq=%d, ballot=%s", n.id, req.SequenceNumber, reqBallot.String())
+		phaseStr := ""
+		if req.Phase != "" {
+			phaseStr = fmt.Sprintf(", phase='%s'", req.Phase)
+		}
+		log.Printf("Node %d: Received ACCEPT seq=%d, ballot=%s%s", n.id, req.SequenceNumber, reqBallot.String(), phaseStr)
 
-		ent := types.NewLogEntry(reqBallot, req.SequenceNumber, req.Request, req.IsNoop)
+		// Create log entry with phase marker
+		var ent *types.LogEntry
+		if req.Phase != "" {
+			ent = types.NewLogEntryWithPhase(reqBallot, req.SequenceNumber, req.Request, req.IsNoop, req.Phase)
+		} else {
+			ent = types.NewLogEntry(reqBallot, req.SequenceNumber, req.Request, req.IsNoop)
+		}
 		ent.Status = "A"
 
 		n.logMu.Lock()
@@ -652,6 +685,12 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 			n.log[req.SequenceNumber] = ent
 		}
 		n.logMu.Unlock()
+
+		// NEW: If this is a 2PC transaction (has phase marker), handle it
+		if req.Phase != "" {
+			log.Printf("Node %d: 2PC phase '%s' detected for seq=%d, calling handle2PCPhase", n.id, req.Phase, req.SequenceNumber)
+			n.handle2PCPhase(ent, req.Phase)
+		}
 
 		log.Printf("Node %d: ✓ ACCEPTED seq=%d", n.id, req.SequenceNumber)
 	}
@@ -731,7 +770,7 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 	// This ensures linearizability by maintaining sequential order
 	log.Printf("Node %d: ▶️  Executing committed entries from %d to %d", n.id, lastExec+1, seq)
 
-	finalResult := pb.ResultType_SUCCESS
+	finalResult := pb.ResultType_FAILED // ← CRITICAL FIX: Default to FAILED, not SUCCESS!
 	for nextSeq := lastExec + 1; nextSeq <= seq; nextSeq++ {
 		n.logMu.RLock()
 		nextEntry, exists := n.log[nextSeq]
@@ -860,33 +899,33 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		// Ensure locks are released after execution
 		defer n.releaseLocks(lockedItems, clientID, timestamp)
 
-		// Check balance only if we're processing the sender (use balanceMu)
-		if ownsSender {
-			n.balanceMu.RLock()
-			senderBalance := n.balances[sender]
-			n.balanceMu.RUnlock()
+		// ATOMIC: Check balance and apply changes while holding balanceMu
+		// This prevents TOCTOU race condition between check and deduct
+		var changedItemID int32
+		var result pb.ResultType
+		n.balanceMu.Lock()
 
+		if ownsSender {
+			// Check and debit from sender ATOMICALLY
+			senderBalance := n.balances[sender]
 			if senderBalance < amt {
+				n.balanceMu.Unlock()
 				log.Printf("Node %d: INSUFFICIENT BALANCE for item %d (has %d needs %d)",
 					n.id, sender, senderBalance, amt)
 				n.logMu.Lock()
 				entry.Status = "E"
+				entry.Result = pb.ResultType_INSUFFICIENT_BALANCE
 				if seq > n.lastExecuted {
 					n.lastExecuted = seq
 				}
 				n.logMu.Unlock()
 				return pb.ResultType_INSUFFICIENT_BALANCE
 			}
-		}
-
-		// Apply only our part of the transaction (use balanceMu for brief write)
-		var changedItemID int32
-		n.balanceMu.Lock()
-		if ownsSender {
-			// Debit from sender
+			// Balance sufficient - deduct immediately (still holding lock)
 			senderOldBalance := n.balances[sender]
 			n.balances[sender] -= amt
 			changedItemID = sender
+			result = pb.ResultType_SUCCESS
 			log.Printf("Node %d: ✅ EXECUTED seq=%d (2PC-DEBIT): item %d: %d→%d (owns sender, cluster %d)",
 				n.id, seq, sender, senderOldBalance, n.balances[sender], n.clusterID)
 		} else if ownsReceiver {
@@ -894,10 +933,20 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 			recvOldBalance := n.balances[recv]
 			n.balances[recv] += amt
 			changedItemID = recv
+			result = pb.ResultType_SUCCESS
 			log.Printf("Node %d: ✅ EXECUTED seq=%d (2PC-CREDIT): item %d: %d→%d (owns receiver, cluster %d)",
 				n.id, seq, recv, recvOldBalance, n.balances[recv], n.clusterID)
 		} else {
+			n.balanceMu.Unlock()
 			log.Printf("Node %d: ⚠️  UNEXPECTED: Cross-shard but don't own sender or receiver!", n.id)
+			n.logMu.Lock()
+			entry.Status = "E"
+			entry.Result = pb.ResultType_FAILED
+			if seq > n.lastExecuted {
+				n.lastExecuted = seq
+			}
+			n.logMu.Unlock()
+			return pb.ResultType_FAILED
 		}
 		newBalance := n.balances[changedItemID]
 		n.balanceMu.Unlock()
@@ -905,6 +954,7 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		// Update log and lastExecuted atomically (use logMu)
 		n.logMu.Lock()
 		entry.Status = "E"
+		entry.Result = result
 		// Update lastExecuted to highest contiguous sequence
 		if seq > n.lastExecuted {
 			n.lastExecuted = seq
@@ -943,15 +993,17 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	// Ensure locks are released after execution
 	defer n.releaseLocks(lockedItems, clientID, timestamp)
 
-	// Check balance (use balanceMu)
-	n.balanceMu.RLock()
+	// ATOMIC: Check balance and apply changes while holding balanceMu
+	// This prevents TOCTOU race condition between check and deduct
+	n.balanceMu.Lock()
 	senderBalance := n.balances[sender]
-	n.balanceMu.RUnlock()
 
 	if senderBalance < amt {
+		n.balanceMu.Unlock()
 		log.Printf("Node %d: INSUFFICIENT BALANCE for item %d (has %d needs %d)", n.id, sender, senderBalance, amt)
 		n.logMu.Lock()
 		entry.Status = "E"
+		entry.Result = pb.ResultType_INSUFFICIENT_BALANCE
 		if seq > n.lastExecuted {
 			n.lastExecuted = seq
 		}
@@ -959,31 +1011,29 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		return pb.ResultType_INSUFFICIENT_BALANCE
 	}
 
-	// Phase 5: Create WAL entry before applying changes (for future 2PC rollback)
-	txnID := fmt.Sprintf("txn-%s-%d", clientID, timestamp)
-	n.createWALEntry(txnID, seq)
-
-	// Record old values before modifying (with balanceMu)
-	n.balanceMu.RLock()
+	// Balance sufficient - record old values and apply changes atomically
 	senderOldBalance := n.balances[sender]
 	recvOldBalance := n.balances[recv]
-	n.balanceMu.RUnlock()
 
-	// Write operations to WAL (has its own walMu)
-	n.writeToWAL(txnID, types.OpTypeDebit, sender, senderOldBalance, senderOldBalance-amt)
-	n.writeToWAL(txnID, types.OpTypeCredit, recv, recvOldBalance, recvOldBalance+amt)
-
-	// Apply balance changes (use balanceMu for brief write)
-	n.balanceMu.Lock()
+	// Apply balance changes (still holding lock)
 	n.balances[sender] -= amt
 	n.balances[recv] += amt
 	newSenderBalance := n.balances[sender]
 	newRecvBalance := n.balances[recv]
 	n.balanceMu.Unlock()
 
+	// Phase 5: Create WAL entry after applying changes (for rollback if needed)
+	txnID := fmt.Sprintf("txn-%s-%d", clientID, timestamp)
+	n.createWALEntry(txnID, seq)
+
+	// Write operations to WAL (has its own walMu)
+	n.writeToWAL(txnID, types.OpTypeDebit, sender, senderOldBalance, newSenderBalance)
+	n.writeToWAL(txnID, types.OpTypeCredit, recv, recvOldBalance, newRecvBalance)
+
 	// Update log (use logMu)
 	n.logMu.Lock()
 	entry.Status = "E"
+	entry.Result = pb.ResultType_SUCCESS
 	if seq > n.lastExecuted {
 		n.lastExecuted = seq
 	}
@@ -1219,11 +1269,14 @@ func (n *Node) SetActive(ctx context.Context, req *pb.SetActiveRequest) (*pb.Set
 	log.Printf("Node %d: ⚙️  SetActive PROCESSING: wasActive=%v, nowActive=%v, wasLeader=%v, leaderID=%d",
 		n.id, wasActive, n.isActive, wasLeader, currentLeaderID)
 
-	// If becoming inactive and was leader, step down
-	if !req.Active && wasLeader {
+	// BOOTSTRAP FIX: Clear leader state for ALL nodes when going inactive
+	// Each test set should start fresh with no knowledge of previous leaders
+	if !req.Active {
 		n.isLeader = false
-		n.leaderID = 0 // No known leader
-		log.Printf("Node %d: ⚙️  Was leader, stepping down and clearing leaderID", n.id)
+		n.leaderID = -1                          // -1 indicates no known leader (fresh start)
+		n.promisedBallot = types.NewBallot(0, 0) // Clear promised ballot for fresh elections
+		n.currentBallot = types.NewBallot(0, n.id)
+		log.Printf("Node %d: ⚙️  Set to INACTIVE - clearing ALL leader state (leaderID → -1, ballots → 0)", n.id)
 	}
 
 	currentActive := n.isActive
@@ -1232,19 +1285,11 @@ func (n *Node) SetActive(ctx context.Context, req *pb.SetActiveRequest) (*pb.Set
 	if req.Active {
 		// Node is now active (either newly activated or already was active)
 		if wasActive {
-			log.Printf("Node %d: ✅ Node already ACTIVE (leader=%d)", n.id, currentLeaderID)
-			// Don't trigger election here - wait for first transaction
-			// Elections should only be triggered by:
-			// 1. Transaction requests (when no leader is known)
-			// 2. Leader timeout
+			log.Printf("Node %d: ✅ Node already ACTIVE", n.id)
 		} else {
-			log.Printf("Node %d: ✅ Node set to ACTIVE (was inactive)", n.id)
-
+			log.Printf("Node %d: ✅ Node set to ACTIVE (fresh start, no prior leader knowledge)", n.id)
 			// Don't trigger election here - wait for first transaction
 			// The client will send to n1/n4/n7 first, and they will become leaders
-			if !wasLeader && currentLeaderID > 0 {
-				log.Printf("Node %d: Believes leader is %d", n.id, currentLeaderID)
-			}
 		}
 	} else {
 		log.Printf("Node %d: ⏸️  Node set to INACTIVE (simulating failure)", n.id)

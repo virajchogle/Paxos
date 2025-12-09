@@ -247,13 +247,13 @@ func (m *ClientManager) processNextSet() {
 		return
 	}
 
-	// Flush state before processing the next test set
-	// This ensures each test starts with clean slate
+	// BOOTSTRAP: Treat every test set as a fresh start
+	// This prevents split-brain issues and ensures clean leader elections
+
+	// Step 1: Flush state if not first test set
 	if m.currentSet > 0 {
 		fmt.Println("\n🔄 Flushing system state before next test set...")
 		m.flushAllNodes()
-		// Short pause to ensure flush completes
-		// (timer is stopped after flush, so no need for long wait)
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -273,47 +273,57 @@ func (m *ClientManager) processNextSet() {
 	}
 	fmt.Println()
 
-	// Show inactive nodes warning
+	// Step 2: BOOTSTRAP - Set ALL nodes to INACTIVE first
+	fmt.Printf("🔄 BOOTSTRAP: Setting all nodes to INACTIVE...\n")
+	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+		if err := m.setNodeActive(nodeID, false); err != nil {
+			// Ignore errors - node might already be inactive
+		}
+	}
+
+	// Wait for all nodes to become inactive and clear leader state
+	fmt.Printf("⏳ Waiting for all nodes to become inactive...\n")
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 3: Activate ONLY the required nodes for this test set
+	fmt.Printf("✅ Activating nodes %v...\n", set.ActiveNodes)
+	for _, nodeID := range set.ActiveNodes {
+		if err := m.setNodeActive(nodeID, true); err != nil {
+			fmt.Printf("    ⚠️  Warning: Failed to activate node %d: %v\n", nodeID, err)
+		}
+	}
+
+	// Step 4: Send initial request to expected leaders (n1, n4, n7) to trigger election
+	// This ensures consistent leader election (these nodes are favored)
+	fmt.Printf("⏳ Triggering leader election on expected leaders (n1, n4, n7)...\n")
+
+	// Determine which expected leaders are active
 	activeMap := make(map[int32]bool)
 	for _, nodeID := range set.ActiveNodes {
 		activeMap[nodeID] = true
 	}
 
-	inactiveNodes := []int32{}
-	for nodeID := int32(1); nodeID <= 9; nodeID++ {
-		if !activeMap[nodeID] {
-			inactiveNodes = append(inactiveNodes, nodeID)
-		}
+	// Send a no-op to each cluster's expected leader if they're active
+	// Use cluster-appropriate data items to trigger elections
+	expectedLeaders := map[int32]int32{
+		1: 1,    // Node 1 → query item 1 (cluster 1)
+		4: 3001, // Node 4 → query item 3001 (cluster 2)
+		7: 6001, // Node 7 → query item 6001 (cluster 3)
 	}
-
-	// Automatically set inactive nodes
-	if len(inactiveNodes) > 0 {
-		fmt.Printf("⚠️  Setting nodes %v to INACTIVE\n", inactiveNodes)
-		for _, nodeID := range inactiveNodes {
-			if err := m.setNodeActive(nodeID, false); err != nil {
-				fmt.Printf("    Warning: Failed to deactivate node %d: %v\n", nodeID, err)
+	for leaderID, dataItem := range expectedLeaders {
+		if activeMap[leaderID] {
+			// Trigger election by querying a balance from that node's cluster
+			if nodeClient, exists := m.nodeClients[leaderID]; exists {
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+				nodeClient.QueryBalance(ctx, &pb.BalanceQueryRequest{DataItemId: dataItem})
+				cancel()
 			}
 		}
-
-		// Give time for remaining nodes to detect leader failure and elect new leader
-		fmt.Printf("⏳ Waiting for new leader election...\n")
-		time.Sleep(300 * time.Millisecond)
 	}
 
-	// Ensure active nodes are active (in case they were previously inactive)
-	fmt.Printf("✅ Ensuring nodes %v are ACTIVE\n", set.ActiveNodes)
-	for _, nodeID := range set.ActiveNodes {
-		if err := m.setNodeActive(nodeID, true); err != nil {
-			fmt.Printf("    Warning: Failed to activate node %d: %v\n", nodeID, err)
-		}
-	}
-
-	// Give activated nodes time to elect leader and stabilize
-	// With fresh state (after flush), election should be fast
-	if len(set.ActiveNodes) > 0 {
-		fmt.Printf("⏳ Waiting for nodes to elect leader and stabilize...\n")
-		time.Sleep(300 * time.Millisecond)
-	}
+	// Give nodes time to elect leader and stabilize
+	fmt.Printf("⏳ Waiting for leader election to complete...\n")
+	time.Sleep(3000 * time.Millisecond) // 3 seconds to allow elections to complete
 
 	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
 
@@ -626,6 +636,25 @@ func (m *ClientManager) getTargetNodeForTransaction(sender, receiver int32) (int
 	m.mu.Unlock()
 
 	if !exists {
+		// BOOTSTRAP: Prefer expected leaders (n1, n4, n7) - one per cluster
+		// This ensures consistent leader election across test sets
+		expectedLeaders := map[int32]int32{
+			1: 1, // Cluster 1 → Node 1
+			2: 4, // Cluster 2 → Node 4
+			3: 7, // Cluster 3 → Node 7
+		}
+
+		if expectedLeader, hasExpected := expectedLeaders[senderCluster]; hasExpected {
+			// Check if expected leader is available
+			if _, isAvailable := m.nodeClients[expectedLeader]; isAvailable {
+				targetNode = expectedLeader
+				m.mu.Lock()
+				m.clusterLeaders[senderCluster] = targetNode
+				m.mu.Unlock()
+				return targetNode, isCrossShard
+			}
+		}
+
 		// Fallback: use first node in sender's cluster
 		nodes := m.config.GetNodesInCluster(int(senderCluster))
 		if len(nodes) > 0 {

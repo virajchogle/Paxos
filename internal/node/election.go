@@ -152,6 +152,7 @@ collectLoop:
 	n.isLeader = true
 	n.leaderID = n.id
 	n.currentBallot = tentative
+	n.systemInitialized = true // Mark system as initialized when we become leader
 	n.paxosMu.Unlock()
 
 	log.Printf("Node %d: 👑 Elected as LEADER with quorum %d/%d", n.id, promiseCount, n.quorumSize())

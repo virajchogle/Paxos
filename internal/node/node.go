@@ -20,8 +20,8 @@ import (
 	pb "paxos-banking/proto"
 )
 
-// Lock represents a lock on a data item
-type Lock struct {
+// DataItemLock represents a lock on a data item
+type DataItemLock struct {
 	clientID  string
 	timestamp int64
 	lockedAt  time.Time
@@ -73,14 +73,18 @@ type Node struct {
 	modifiedItems       map[int32]bool  // Track which items have been modified
 
 	// Locking mechanism (Phase 2) - has own lockMu
-	lockMu      sync.Mutex      // Separate mutex for lock operations
-	locks       map[int32]*Lock // dataItemID -> Lock
-	lockTimeout time.Duration   // How long to wait for a lock
+	lockMu      sync.Mutex              // Separate mutex for lock operations
+	locks       map[int32]*DataItemLock // dataItemID -> Lock
+	lockTimeout time.Duration           // How long to wait for a lock
 
 	// Write-Ahead Log (Phase 5) - for 2PC rollback
 	walMu   sync.RWMutex               // Separate mutex for WAL operations
 	wal     map[string]*types.WALEntry // transactionID -> WALEntry
 	walFile string                     // Path to WAL file for persistence
+
+	// Two-Phase Commit State (Full 2PC Protocol)
+	twoPCState TwoPCState                 // Tracks active 2PC transactions (leader only)
+	twoPCWAL   map[string]map[int32]int32 // txnID -> (itemID -> oldBalance) - ALL nodes
 
 	// Communication
 	grpcServer  *grpc.Server
@@ -167,7 +171,7 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		balances:           make(map[int32]int32),                   // Changed to int32 -> int32
 		checkpointInterval: 100,                                     // Checkpoint every 100 transactions
 		modifiedItems:      make(map[int32]bool),                    // Track modified items
-		locks:              make(map[int32]*Lock),                   // Initialize lock table
+		locks:              make(map[int32]*DataItemLock),           // Initialize lock table
 		lockTimeout:        100 * time.Millisecond,                  // Was 2s - now 100ms for performance
 		wal:                make(map[string]*types.WALEntry),        // Initialize WAL (Phase 5)
 		walFile:            fmt.Sprintf("data/node%d_wal.json", id), // WAL persistence file
@@ -186,6 +190,10 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		startTime:          time.Now(),                              // Phase 7: Track uptime
 		accessTracker:      redistribution.NewAccessTracker(100000), // Phase 9: Access pattern tracking
 		migrationState:     nil,                                     // Phase 9: Initialized on first migration
+		twoPCState: TwoPCState{
+			transactions: make(map[string]*TwoPCTransaction),
+		},
+		twoPCWAL: make(map[string]map[int32]int32), // WAL for all nodes
 	}
 
 	// Open PebbleDB for persistent storage
@@ -499,12 +507,21 @@ func (n *Node) startHeartbeat() {
 	go func() {
 		ticker := time.NewTicker(n.heartbeatInterval)
 		defer ticker.Stop()
+
+		// Ensure we clean up heartbeatStop when exiting
+		defer func() {
+			n.paxosMu.Lock()
+			n.heartbeatStop = nil
+			n.paxosMu.Unlock()
+		}()
+
 		for {
 			select {
 			case <-ticker.C:
 				n.paxosMu.RLock()
 				if !n.isLeader {
 					n.paxosMu.RUnlock()
+					log.Printf("Node %d: ❌ Heartbeat goroutine exiting - no longer leader", n.id)
 					return
 				}
 				// snapshot peer clients
@@ -928,7 +945,7 @@ func (n *Node) acquireLock(dataItemID int32, clientID string, timestamp int64) b
 			log.Printf("Node %d: Lock on item %d expired (held by %s), granting to %s",
 				n.id, dataItemID, lock.clientID, clientID)
 			// Lock expired, can grant to new client
-			n.locks[dataItemID] = &Lock{
+			n.locks[dataItemID] = &DataItemLock{
 				clientID:  clientID,
 				timestamp: timestamp,
 				lockedAt:  time.Now(),
@@ -943,7 +960,7 @@ func (n *Node) acquireLock(dataItemID int32, clientID string, timestamp int64) b
 	}
 
 	// No lock exists, grant it
-	n.locks[dataItemID] = &Lock{
+	n.locks[dataItemID] = &DataItemLock{
 		clientID:  clientID,
 		timestamp: timestamp,
 		lockedAt:  time.Now(),
@@ -1070,14 +1087,14 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 		n.currentBallot = types.NewBallot(0, n.id)
 		n.promisedBallot = types.NewBallot(0, 0)
 		n.isLeader = false
-		n.leaderID = -1
+		n.leaderID = -1 // -1 indicates no known leader (fresh start)
 		n.systemInitialized = false
-		log.Printf("Node %d: Ballot and leader state reset", n.id)
+		log.Printf("Node %d: Ballot and leader state reset (leaderID → -1, ballots → 0)", n.id)
 	}
 
 	// Clear locks
 	n.lockMu.Lock()
-	n.locks = make(map[int32]*Lock)
+	n.locks = make(map[int32]*DataItemLock)
 	n.lockMu.Unlock()
 
 	// Clear WAL

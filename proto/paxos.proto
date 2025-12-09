@@ -130,6 +130,7 @@ message AcceptRequest {
   int32 sequence_number = 2;
   TransactionRequest request = 3;
   bool is_noop = 4;
+  string phase = 5; // 2PC phase: ""=normal, "P"=Prepare, "C"=Commit, "A"=Abort
 }
 
 message AcceptedReply {
@@ -145,6 +146,7 @@ message CommitRequest {
   int32 sequence_number = 2;
   TransactionRequest request = 3;
   bool is_noop = 4;
+  string phase = 5; // 2PC phase: ""=normal, "P"=Prepare, "C"=Commit, "A"=Abort
 }
 
 message CommitReply {
