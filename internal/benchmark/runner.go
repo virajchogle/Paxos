@@ -2,8 +2,10 @@ package benchmark
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -351,8 +353,94 @@ func (br *BenchmarkRunner) printFinalReport() {
 // exportCSV exports results to CSV file
 func (br *BenchmarkRunner) exportCSV() {
 	log.Printf("📄 Exporting results to %s...\n", br.config.OutputFile)
-	// TODO: Implement CSV export
-	log.Println("(CSV export not yet implemented)")
+
+	file, err := os.Create(br.config.OutputFile)
+	if err != nil {
+		log.Printf("❌ Failed to create CSV file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	header := []string{
+		"Metric", "Value",
+	}
+	if err := writer.Write(header); err != nil {
+		log.Printf("❌ Failed to write CSV header: %v\n", err)
+		return
+	}
+
+	duration := br.endTime.Sub(br.startTime)
+	total := br.stats.GetTotal()
+	successful := br.stats.GetSuccessful()
+	failed := br.stats.GetFailed()
+	successRate := float64(successful) / float64(total) * 100
+	actualTPS := float64(total) / duration.Seconds()
+
+	// Overall metrics
+	rows := [][]string{
+		{"Duration (seconds)", fmt.Sprintf("%.2f", duration.Seconds())},
+		{"Total Transactions", fmt.Sprintf("%d", total)},
+		{"Successful", fmt.Sprintf("%d", successful)},
+		{"Failed", fmt.Sprintf("%d", failed)},
+		{"Success Rate (%)", fmt.Sprintf("%.2f", successRate)},
+		{"Throughput (TPS)", fmt.Sprintf("%.2f", actualTPS)},
+		{"Target TPS", fmt.Sprintf("%d", br.config.TargetTPS)},
+		{"Concurrent Clients", fmt.Sprintf("%d", br.config.NumClients)},
+		{"Cross-Shard (%)", fmt.Sprintf("%d", br.config.CrossShardPercent)},
+		{"Read-Only (%)", fmt.Sprintf("%d", br.config.ReadOnlyPercent)},
+		{"Data Distribution", br.config.DataDistribution},
+	}
+
+	// Latency metrics
+	p50, p95, p99, p999 := br.stats.GetPercentiles()
+	avg := br.stats.GetAverageLatency()
+	min := br.stats.GetMinLatency()
+	max := br.stats.GetMaxLatency()
+
+	rows = append(rows, [][]string{
+		{"", ""},
+		{"Latency Metrics", ""},
+		{"Average Latency (ms)", fmt.Sprintf("%.2f", float64(avg.Microseconds())/1000.0)},
+		{"Min Latency (ms)", fmt.Sprintf("%.2f", float64(min.Microseconds())/1000.0)},
+		{"Max Latency (ms)", fmt.Sprintf("%.2f", float64(max.Microseconds())/1000.0)},
+		{"P50 Latency (ms)", fmt.Sprintf("%.2f", float64(p50.Microseconds())/1000.0)},
+		{"P95 Latency (ms)", fmt.Sprintf("%.2f", float64(p95.Microseconds())/1000.0)},
+		{"P99 Latency (ms)", fmt.Sprintf("%.2f", float64(p99.Microseconds())/1000.0)},
+		{"P99.9 Latency (ms)", fmt.Sprintf("%.2f", float64(p999.Microseconds())/1000.0)},
+	}...)
+
+	// Per-type metrics
+	rows = append(rows, []string{"", ""})
+	rows = append(rows, []string{"Per-Type Metrics", ""})
+
+	for _, txnType := range []TransactionType{TxnTypeIntraShard, TxnTypeCrossShard, TxnTypeReadOnly} {
+		count := br.stats.GetCountByType(txnType)
+		if count > 0 {
+			avgLatency := br.stats.GetAverageLatencyByType(txnType)
+			rows = append(rows, []string{
+				fmt.Sprintf("%s Count", txnType.String()),
+				fmt.Sprintf("%d", count),
+			})
+			rows = append(rows, []string{
+				fmt.Sprintf("%s Avg Latency (ms)", txnType.String()),
+				fmt.Sprintf("%.2f", float64(avgLatency.Microseconds())/1000.0),
+			})
+		}
+	}
+
+	// Write all rows
+	for _, row := range rows {
+		if err := writer.Write(row); err != nil {
+			log.Printf("❌ Failed to write CSV row: %v\n", err)
+			return
+		}
+	}
+
+	log.Printf("✅ Results exported to %s\n", br.config.OutputFile)
 }
 
 // ============================================================================
@@ -529,4 +617,3 @@ func (s *Statistics) GetAverageLatencyByType(txnType TransactionType) time.Durat
 	}
 	return total / time.Duration(len(latencies))
 }
-

@@ -1,6 +1,10 @@
 # Binaries
 bin/
 *.exe
+cmd/*/main
+cmd/node/node
+cmd/client/client
+cmd/benchmark/benchmark
 
 # Data files
 data/
@@ -9,6 +13,10 @@ data/
 # Logs
 logs/
 *.log
+
+# Benchmark results
+results/
+*.csv
 
 # Go specific
 *.o
