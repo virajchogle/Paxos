@@ -1421,16 +1421,19 @@ func (m *ClientManager) performanceAllNodes() {
 		} else if result.reply != nil {
 			r := result.reply
 			fmt.Printf("\n--- Node %d (Cluster %d) ---\n", r.NodeId, r.ClusterId)
+			fmt.Printf("  Throughput: %s\n", r.Message)
 			fmt.Printf("  Total Transactions: %d (Success: %d, Failed: %d)\n",
 				r.TotalTransactions, r.SuccessfulTransactions, r.FailedTransactions)
+			fmt.Printf("  Avg Latency: %.2f ms\n", r.AvgTransactionTimeMs)
 			fmt.Printf("  2PC: Coordinator=%d, Participant=%d, Commits=%d, Aborts=%d\n",
 				r.TwopcCoordinator, r.TwopcParticipant, r.TwopcCommits, r.TwopcAborts)
+			if r.Avg_2PcTimeMs > 0 {
+				fmt.Printf("  2PC Avg Latency: %.2f ms\n", r.Avg_2PcTimeMs)
+			}
 			fmt.Printf("  Elections: Started=%d, Won=%d\n",
 				r.ElectionsStarted, r.ElectionsWon)
 			fmt.Printf("  Locks: Acquired=%d, Timeout=%d\n",
 				r.LocksAcquired, r.LocksTimeout)
-			fmt.Printf("  Avg Latency: Txn=%.2fms, 2PC=%.2fms\n",
-				r.AvgTransactionTimeMs, r.Avg_2PcTimeMs)
 			fmt.Printf("  Uptime: %d seconds\n", r.UptimeSeconds)
 		}
 	}

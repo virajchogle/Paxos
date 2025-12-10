@@ -312,6 +312,9 @@ func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*
 // 🚀 processAsLeaderAsync: PIPELINED version that overlaps consensus phases
 // Leader can start Accept for seq=2 while seq=1 is still executing
 func (n *Node) processAsLeaderAsync(req *pb.TransactionRequest) (*pb.TransactionReply, error) {
+	// Start timing for performance measurement
+	txnStart := time.Now()
+
 	// Quick check for duplicate (use clientMu)
 	n.clientMu.RLock()
 	if lastReply, exists := n.clientLastReply[req.ClientId]; exists {
@@ -351,6 +354,20 @@ func (n *Node) processAsLeaderAsync(req *pb.TransactionRequest) (*pb.Transaction
 
 	// Run consensus
 	reply, _ := n.runPipelinedConsensus(seq, ballot, req, entry)
+
+	// Record performance metrics (use microseconds for sub-ms precision)
+	txnDurationUs := time.Since(txnStart).Microseconds()
+	n.perfMu.Lock()
+	n.totalTransactions++
+	n.totalTransactionTimeMs += txnDurationUs // Store in microseconds
+	n.totalTransactionCount++
+	if reply.Success {
+		n.successfulTransactions++
+	} else {
+		n.failedTransactions++
+	}
+	n.perfMu.Unlock()
+
 	return reply, nil
 }
 
@@ -978,6 +995,87 @@ func (n *Node) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Status
 		NextSequenceNumber:   nextSeq,
 		TransactionsReceived: logLen,
 	}, nil
+}
+
+// GetPerformance returns performance metrics for this node
+// Measures throughput and latency from client request to response
+func (n *Node) GetPerformance(ctx context.Context, req *pb.GetPerformanceRequest) (*pb.GetPerformanceReply, error) {
+	n.perfMu.RLock()
+	defer n.perfMu.RUnlock()
+
+	// Calculate averages (stored in microseconds, convert to milliseconds)
+	var avgTxnTimeMs float64
+	if n.totalTransactionCount > 0 {
+		avgTxnTimeMs = float64(n.totalTransactionTimeMs) / float64(n.totalTransactionCount) / 1000.0
+	}
+
+	var avg2PCTimeMs float64
+	if n.total2PCCount > 0 {
+		avg2PCTimeMs = float64(n.total2PCTimeMs) / float64(n.total2PCCount)
+	}
+
+	// Calculate uptime
+	uptimeSeconds := int64(time.Since(n.startTime).Seconds())
+
+	// Calculate throughput (transactions per second)
+	var throughputStr string
+	if uptimeSeconds > 0 {
+		throughput := float64(n.successfulTransactions) / float64(uptimeSeconds)
+		throughputStr = fmt.Sprintf("%.2f TPS", throughput)
+	} else {
+		throughputStr = "N/A (< 1s uptime)"
+	}
+
+	reply := &pb.GetPerformanceReply{
+		Success:                true,
+		NodeId:                 n.id,
+		ClusterId:              n.clusterID,
+		TotalTransactions:      n.totalTransactions,
+		SuccessfulTransactions: n.successfulTransactions,
+		FailedTransactions:     n.failedTransactions,
+		TwopcCoordinator:       n.twoPCCoordinator,
+		TwopcParticipant:       n.twoPCParticipant,
+		TwopcCommits:           n.twoPCCommits,
+		TwopcAborts:            n.twoPCAborts,
+		AvgTransactionTimeMs:   avgTxnTimeMs,
+		Avg_2PcTimeMs:          avg2PCTimeMs,
+		ElectionsStarted:       n.electionsStarted,
+		ElectionsWon:           n.electionsWon,
+		ProposalsMade:          n.proposalsMade,
+		ProposalsAccepted:      n.proposalsAccepted,
+		LocksAcquired:          n.locksAcquired,
+		LocksTimeout:           n.locksTimeout,
+		UptimeSeconds:          uptimeSeconds,
+		Message:                throughputStr,
+	}
+
+	// Reset counters if requested
+	if req.ResetCounters {
+		n.perfMu.RUnlock()
+		n.perfMu.Lock()
+		n.totalTransactions = 0
+		n.successfulTransactions = 0
+		n.failedTransactions = 0
+		n.twoPCCoordinator = 0
+		n.twoPCParticipant = 0
+		n.twoPCCommits = 0
+		n.twoPCAborts = 0
+		n.electionsStarted = 0
+		n.electionsWon = 0
+		n.proposalsMade = 0
+		n.proposalsAccepted = 0
+		n.locksAcquired = 0
+		n.locksTimeout = 0
+		n.totalTransactionTimeMs = 0
+		n.totalTransactionCount = 0
+		n.total2PCTimeMs = 0
+		n.total2PCCount = 0
+		n.startTime = time.Now()
+		n.perfMu.Unlock()
+		n.perfMu.RLock()
+	}
+
+	return reply, nil
 }
 
 func (n *Node) DebugPrintDB() {
