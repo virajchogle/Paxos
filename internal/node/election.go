@@ -49,7 +49,6 @@ func (n *Node) StartLeaderElection() {
 	n.paxosMu.RUnlock()
 
 	tentative := types.NewBallot(maxBallotNum+1, n.id)
-	log.Printf("Node %d: Election ballot %s", n.id, tentative.String())
 
 	peers := make(map[int32]pb.PaxosNodeClient, len(n.peerClients))
 	for k, v := range n.peerClients {
@@ -116,8 +115,6 @@ collectLoop:
 	n.systemInitialized = true // Mark system as initialized when we become leader
 	n.paxosMu.Unlock()
 
-	log.Printf("Node %d: 👑 Elected as LEADER with quorum %d/%d", n.id, promiseCount, n.quorumSize())
-
 	// Build NEW-VIEW and broadcast
 	n.sendNewView(acceptLogs, tentative)
 
@@ -125,8 +122,7 @@ collectLoop:
 	n.resetLeaderTimer()
 	n.startHeartbeat()
 
-	// 2PC Recovery: Check for incomplete 2PC transactions and resume them
-	// Run in background to not block election completion
+	// 2PC recovery in background
 	go func() {
 		time.Sleep(500 * time.Millisecond) // Brief wait for NEW-VIEW to propagate
 		n.Recover2PCTransactions()
@@ -136,24 +132,16 @@ collectLoop:
 // Prepare handles incoming PREPARE
 func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.PromiseReply, error) {
 	reqBallot := types.BallotFromProto(req.Ballot)
-	log.Printf("Node %d: Received PREPARE %s from node %d", n.id, reqBallot.String(), req.NodeId)
-
-	// NOTE: Don't set systemInitialized here - it should only be set when
-	// transactions are actually being processed, not during election.
-	// This prevents non-expected leaders from starting elections during bootstrap.
 
 	// Check if node is active and ballot (use paxosMu)
 	n.paxosMu.RLock()
 	if !n.isActive {
 		n.paxosMu.RUnlock()
-		log.Printf("Node %d: Rejecting PREPARE - node is INACTIVE", n.id)
 		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
 	}
 
-	// Quick check without lock first
 	if reqBallot.Compare(n.promisedBallot) <= 0 {
 		n.paxosMu.RUnlock()
-		log.Printf("Node %d: Rejecting PREPARE %s - already promised to %s", n.id, reqBallot.String(), n.promisedBallot.String())
 		return &pb.PromiseReply{Success: false, NodeId: n.id}, nil
 	}
 	wasLeader := n.isLeader
@@ -179,10 +167,7 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	n.paxosMu.Lock()
 	n.promisedBallot = reqBallot
 	n.isLeader = false
-	// DON'T set leaderID here - wait for NEW-VIEW to confirm the election succeeded
 	n.paxosMu.Unlock()
-
-	log.Printf("Node %d: ✓ PROMISE to node %d with %d entries", n.id, req.NodeId, len(entries))
 
 	// Do expensive operations without any locks
 	if wasLeader {
@@ -262,8 +247,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 	acceptMsgs := make([]*pb.AcceptRequest, 0, maxSeq)
 	startSeq := int32(1)
 
-	// 🔥 FIX: Only include sequences we actually have - don't fill gaps with NO-OPs
-	// This prevents database divergence caused by replacing real transactions with NO-OPs
+	// only include sequences we have, dont fill gaps with NO-OPs
 	for seq := startSeq; seq <= maxSeq; seq++ {
 		if entry, ok := merged[seq]; ok {
 			acceptMsgs = append(acceptMsgs, &pb.AcceptRequest{
@@ -272,10 +256,6 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 				Request:        entry.Request,
 				IsNoop:         entry.IsNoop,
 			})
-		} else {
-			// 🔥 FIX: Don't fill gaps! Log a warning instead.
-			// A node shouldn't become leader if it has gaps (checked in StartLeaderElection)
-			log.Printf("Node %d: ⚠️  WARNING: Gap at seq %d in NEW-VIEW - this should not happen!", n.id, seq)
 		}
 	}
 
@@ -284,16 +264,13 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 		AcceptMessages: acceptMsgs,
 	}
 
-	// Store NEW-VIEW and update nextSeqNum (use logMu)
-	// Only log NEW-VIEWs after bootstrap completes (first transaction processed)
+	// store NEW-VIEW and update nextSeqNum
 	n.logMu.Lock()
 	if n.bootstrapComplete {
 		n.newViewLog = append(n.newViewLog, newView)
 	}
 	n.nextSeqNum = maxSeq + 1
 	n.logMu.Unlock()
-
-	log.Printf("Node %d: Sending NEW-VIEW with %d messages (covering seq 1-%d)", n.id, len(acceptMsgs), maxSeq)
 
 	// Broadcast new-view (peers are read-only after init)
 	peers := make(map[int32]pb.PaxosNodeClient, len(n.peerClients))
@@ -313,12 +290,7 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel()
 			_, err := c.NewView(ctx, newView)
-			if err != nil {
-				log.Printf("Node %d: Failed to send NEW-VIEW to node %d: %v", n.id, peerID, err)
-				respCh <- nvResp{nodeID: peerID, ok: false}
-			} else {
-				respCh <- nvResp{nodeID: peerID, ok: true}
-			}
+			respCh <- nvResp{nodeID: peerID, ok: err == nil}
 		}(pid, client)
 	}
 
@@ -333,15 +305,10 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 			if r.ok {
 				acceptedCount++
 			}
-			// Check if we have quorum
 			if n.hasQuorum(acceptedCount) {
-				log.Printf("Node %d: NEW-VIEW acknowledged by quorum (%d/%d)",
-					n.id, acceptedCount, n.quorumSize())
 				goto DONE
 			}
 		case <-timeout:
-			log.Printf("Node %d: NEW-VIEW timeout, got %d/%d acknowledgments",
-				n.id, acceptedCount, n.quorumSize())
 			goto DONE
 		}
 	}
@@ -350,14 +317,7 @@ DONE:
 	// process locally (leader applies its own accept messages)
 	n.processNewView(newView)
 
-	if !n.hasQuorum(acceptedCount) {
-		log.Printf("Node %d: ⚠️  NEW-VIEW did not achieve quorum (%d/%d)",
-			n.id, acceptedCount, n.quorumSize())
-	}
-
-	// CRITICAL: After NEW-VIEW, send COMMIT messages for all sequences
-	// This ensures accepted-but-not-committed sequences get committed
-	log.Printf("Node %d: Sending COMMIT messages for all NEW-VIEW sequences", n.id)
+	// After NEW-VIEW, send COMMIT messages for all sequences
 	for _, acceptMsg := range newView.AcceptMessages {
 		commitReq := &pb.CommitRequest{
 			Ballot:         ballot.ToProto(),
@@ -399,22 +359,15 @@ func (n *Node) mergeAcceptLogs(logs [][]*pb.AcceptedEntry) map[int32]*pb.Accepte
 func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewViewReply, error) {
 	log.Printf("Node %d: Received NEW-VIEW with %d messages", n.id, len(req.AcceptMessages))
 
-	// NOTE: Don't set systemInitialized here - it should only be set when
-	// transactions are actually being processed, not during election.
-	// This prevents non-expected leaders from starting elections during bootstrap.
-
-	// Check if node is active (use paxosMu)
 	n.paxosMu.RLock()
 	active := n.isActive
 	n.paxosMu.RUnlock()
 
 	if !active {
-		log.Printf("Node %d: Rejecting NEW-VIEW - node is INACTIVE", n.id)
 		return &pb.NewViewReply{Success: false, NodeId: n.id}, nil
 	}
 
-	// Store NEW-VIEW message for PrintView (use logMu)
-	// Only log NEW-VIEWs after bootstrap completes (first transaction processed)
+	// store NEW-VIEW for PrintView
 	n.logMu.Lock()
 	if n.bootstrapComplete {
 		// Check if we already have this exact NEW-VIEW (avoid duplicates)
@@ -441,13 +394,9 @@ func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewView
 func (n *Node) processNewView(req *pb.NewViewRequest) {
 	ballot := types.BallotFromProto(req.Ballot)
 
-	// Check and update Paxos state (use paxosMu and logMu)
 	n.paxosMu.Lock()
-	// Only accept NEW-VIEW if ballot is >= our promised ballot
 	if ballot.Compare(n.promisedBallot) < 0 {
 		n.paxosMu.Unlock()
-		log.Printf("Node %d: Ignoring NEW-VIEW with lower ballot %s (promised: %s)",
-			n.id, ballot.String(), n.promisedBallot.String())
 		return
 	}
 
@@ -476,12 +425,7 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 	}
 	n.logMu.RUnlock()
 
-	if len(missing) > 0 {
-		log.Printf("Node %d: Detected gaps in log: %v (lastExec=%d, maxSeq=%d)", n.id, missing, lastExec, maxSeq)
-	}
-
-	// Stop heartbeat if we were leader but no longer are
-	// MUST be called without holding n.mu to avoid deadlock
+	// stop heartbeat if we lost leadership
 	if prevLeader && !n.isLeader {
 		n.stopHeartbeat()
 	}
@@ -511,8 +455,6 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 		n.logMu.Unlock()
 
 		if !ok {
-			// Still missing this entry
-			log.Printf("Node %d: ⚠️  Still missing seq %d after NEW-VIEW - waiting for data", n.id, seq)
 			break
 		}
 
@@ -523,9 +465,4 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 		}
 	}
 
-	n.logMu.RLock()
-	finalExec := n.lastExecuted
-	n.logMu.RUnlock()
-
-	log.Printf("Node %d: NEW-VIEW processed, caught up from seq %d to %d", n.id, lastExecAfter, finalExec)
 }

@@ -218,10 +218,7 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 		}
 	}()
 
-	// Step 2c: Cleanup coordinator state IMMEDIATELY (don't wait for participant ACK!)
-	// CRITICAL: Coordinator's cluster has committed, transaction is durable!
-	// Participant will commit on its replicas (execution already done in PREPARE)
-	// Locks can be released now, client can be notified now!
+	// cleanup coordinator state, dont wait for participant ACK
 	n.cleanup2PCCoordinator(txnID, true)
 
 	log.Printf("Node %d: 2PC[%s]: ✅ TRANSACTION COMMITTED (locks released, participant will ACK in background)", n.id, txnID)
@@ -323,8 +320,7 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 
 	log.Printf("Node %d: 2PC[%s]: Received PREPARE request for item %d (PARTICIPANT)", n.id, txnID, tx.Receiver)
 
-	// Wait for leader election if needed
-	// IMPORTANT: Only expected leaders should start elections
+	// wait for leader election if needed
 	n.paxosMu.RLock()
 	hasLeader := n.isLeader || n.leaderID > 0
 	n.paxosMu.RUnlock()

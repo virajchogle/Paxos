@@ -138,8 +138,7 @@ func getCheckpointInterval(cfg *config.Config) int32 {
 }
 
 func NewNode(id int32, cfg *config.Config) (*Node, error) {
-	// jittered timeout - use milliseconds for leader election
-	// OPTIMIZED FOR HIGH THROUGHPUT (5000+ TPS target)
+	// jittered timeout for leader election
 	rand.Seed(time.Now().UnixNano() + int64(id))
 	baseTimeout := 100 * time.Millisecond                     // Was 500ms - now 100ms for performance
 	jitter := time.Duration(rand.Intn(50)) * time.Millisecond // 0-50ms (was 0-200ms)
@@ -392,9 +391,7 @@ func (n *Node) getCrossClusterClient(nodeID int32) (pb.PaxosNodeClient, error) {
 	return client, nil
 }
 
-// isExpectedLeader returns true if this node is the expected leader for its cluster
-// The expected leader is the first (lowest-numbered) node in the cluster config
-// This is used to prevent election storms during bootstrap
+// isExpectedLeader checks if this node should be leader (first node in cluster)
 func (n *Node) isExpectedLeader() bool {
 	expectedLeader := n.config.GetLeaderNodeForCluster(int(n.clusterID))
 	return n.id == expectedLeader
@@ -451,12 +448,7 @@ func (n *Node) hasQuorum(count int) bool {
 	return count >= n.quorumSize()
 }
 
-//
-// Timers & heartbeat helpers
-//
-
-// startLeaderTimer starts the persistent leader timeout timer goroutine
-// This should be called ONCE during node initialization
+// startLeaderTimer starts the leader timeout timer goroutine
 func (n *Node) startLeaderTimer() {
 	n.timerMu.Lock()
 	n.leaderTimer = time.NewTimer(n.timerDuration)
@@ -474,15 +466,7 @@ func (n *Node) startLeaderTimer() {
 			n.paxosMu.RUnlock()
 
 			if !isLeader && active {
-				// SIMPLE ELECTION POLICY:
-				// Only expected leaders (first node in cluster: n1, n4, n7) can start
-				// elections from the timer. This prevents election storms.
-				//
-				// Non-expected leaders handle leader failure differently:
-				// - When they try to forward a transaction and it fails, they start election
-				// - This is handled in SubmitTransaction
-				//
-				// This approach ensures clean, predictable leader election.
+				// only expected leaders (n1, n4, n7) can start elections from timer
 				if n.isExpectedLeader() && knownLeader <= 0 {
 					log.Printf("Node %d: ⏰ Leader timeout - starting election (expected leader, no known leader)",
 						n.id)
@@ -490,8 +474,6 @@ func (n *Node) startLeaderTimer() {
 				}
 			}
 
-			// Reset timer for next check
-			// Timer is also reset by message handlers when receiving leader activity
 			n.timerMu.Lock()
 			if n.leaderTimer != nil {
 				n.leaderTimer.Reset(n.timerDuration)
@@ -502,7 +484,6 @@ func (n *Node) startLeaderTimer() {
 }
 
 // resetLeaderTimer resets the leader timeout timer
-// This is called when receiving messages from the leader
 func (n *Node) resetLeaderTimer() {
 	n.timerMu.Lock()
 	defer n.timerMu.Unlock()

@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -105,8 +104,6 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 				// ONLY the sender cluster initiates 2PC!
 				if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {
 					// Cross-shard transaction AND we're the sender cluster - use 2PC
-					log.Printf("Node %d: 🌐 Cross-shard transaction detected (%d in cluster %d → %d in cluster %d) - initiating 2PC as COORDINATOR",
-						n.id, tx.Sender, senderCluster, tx.Receiver, receiverCluster)
 
 					success, err := n.TwoPCCoordinator(tx, req.ClientId, req.Timestamp)
 					if err != nil {
@@ -136,7 +133,6 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 				return n.processAsLeader(req)
 			} else if currentLeaderID > 0 && currentLeaderID != n.id {
 				// A leader was elected, forward to them
-				log.Printf("Node %d: Leader %d elected, forwarding transaction", n.id, currentLeaderID)
 				client, exists := n.peerClients[currentLeaderID] // Read-only, no lock needed
 
 				if exists {
@@ -146,13 +142,11 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 					if err2 == nil {
 						return resp2, nil
 					}
-					log.Printf("Node %d: Forward to new leader %d failed: %v", n.id, currentLeaderID, err2)
 				}
 			}
 		}
 
 		// Timeout - no leader elected
-		log.Printf("Node %d: Election timeout, no leader available", n.id)
 		return nil, fmt.Errorf("no leader available yet")
 	}
 
@@ -161,12 +155,9 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 	senderCluster := n.config.GetClusterForDataItem(tx.Sender)
 	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
 
-	// ONLY the sender cluster initiates 2PC!
-	// The receiver cluster processes it as a normal transaction via Paxos
+	// only sender cluster intiates 2PC, reciever processes via Paxos
 	if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {
 		// Cross-shard transaction AND we're the sender cluster - use 2PC
-		log.Printf("Node %d: 🌐 Cross-shard transaction detected (%d in cluster %d → %d in cluster %d) - initiating 2PC as SENDER",
-			n.id, tx.Sender, senderCluster, tx.Receiver, receiverCluster)
 
 		success, err := n.TwoPCCoordinator(tx, req.ClientId, req.Timestamp)
 		if err != nil {
@@ -303,7 +294,6 @@ func (n *Node) processAsLeaderAsync(req *pb.TransactionRequest) (*pb.Transaction
 	n.clientMu.RLock()
 	if lastReply, exists := n.clientLastReply[req.ClientId]; exists {
 		if req.Timestamp <= n.clientLastTS[req.ClientId] {
-			log.Printf("Node %d: 🔄 Returning cached reply for client %s (ts %d)", n.id, req.ClientId, req.Timestamp)
 			n.clientMu.RUnlock()
 			return lastReply, nil
 		}
@@ -454,9 +444,6 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 			status := entry.Status
 			n.logMu.RUnlock()
 
-			log.Printf("Node %d: Duplicate request %s:%d already in log at seq %d (status: %s)",
-				n.id, req.ClientId, req.Timestamp, seq, status)
-
 			// If already executed or committed, return success
 			if status == "E" || status == "C" {
 				// Look for cached reply (use clientMu)
@@ -465,7 +452,6 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 				n.clientMu.RUnlock()
 
 				if hasReply {
-					log.Printf("Node %d: Returning cached reply for %s:%d", n.id, req.ClientId, req.Timestamp)
 					return lastReply, nil
 				}
 				// Return success even without cached reply
@@ -491,8 +477,6 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 	n.paxosMu.RLock()
 	ballot := types.NewBallot(n.currentBallot.Number, n.currentBallot.NodeID)
 	n.paxosMu.RUnlock()
-
-	log.Printf("Node %d: Processing as LEADER - seq=%d", n.id, seq)
 
 	// Create log entry and mark accepted by self
 	entry := types.NewLogEntry(ballot, seq, req, false)
@@ -572,8 +556,6 @@ QUORUM:
 		return nil, fmt.Errorf("no quorum for seq %d (have %d, need %d)", seq, acceptedCount, n.quorumSize())
 	}
 
-	log.Printf("Node %d: Quorum achieved for seq %d (accepted=%d)", n.id, seq, acceptedCount)
-
 	// send commit to peers (best-effort)
 	commitReq := &pb.CommitRequest{
 		Ballot:         ballot.ToProto(),
@@ -612,9 +594,7 @@ QUORUM:
 
 // Accept handler (Phase 2a)
 func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedReply, error) {
-	// 🔒 FINE-GRAINED: Use paxosMu for ballot/leader, logMu for log
-
-	// Mark system as initialized (use paxosMu)
+	// mark system as initialized
 	n.paxosMu.Lock()
 	if !n.systemInitialized {
 		n.systemInitialized = true
@@ -640,9 +620,7 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 	isLeader := n.isLeader
 	n.paxosMu.Unlock()
 
-	// Reset follower timer IMMEDIATELY on leader activity (ACCEPT is a message from leader)
-	// CRITICAL: Do this BEFORE processing to prevent timer from firing during execution
-	// MUST be called without holding paxosMu to avoid deadlock
+	// reset follower timer on leader activity to prevent timeout during processing
 	if !isLeader {
 		n.resetLeaderTimer()
 	}
@@ -678,7 +656,6 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 
 // Commit handles commit requests (Phase 2b)
 func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitReply, error) {
-	// 🔒 FINE-GRAINED: Check if node is active (use paxosMu)
 	n.paxosMu.RLock()
 	active := n.isActive
 	isLeader := n.isLeader
@@ -688,9 +665,7 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 		return &pb.CommitReply{Success: false}, nil
 	}
 
-	// Reset follower timer IMMEDIATELY on leader activity (COMMIT is a message from leader)
-	// CRITICAL: Do this BEFORE processing commit to prevent timer from firing during execution
-	// This ensures followers don't timeout while leader is actively processing transactions
+	// reset follower timer on commit from leader
 	if !isLeader {
 		n.resetLeaderTimer()
 	}
@@ -700,9 +675,6 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 		n.commitAndExecute(req.SequenceNumber)
 	}
 
-	// Check if leader should create checkpoint
-	// Checkpointing removed for consensus correctness
-
 	return &pb.CommitReply{Success: true}, nil
 }
 
@@ -711,12 +683,9 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 // backgroundExecutionThread runs as a single goroutine per node
 // It executes committed transactions SEQUENTIALLY, guaranteeing linearizability
 func (n *Node) backgroundExecutionThread() {
-	log.Printf("Node %d: Background execution thread started (sequential execution)", n.id)
-
 	for {
 		select {
 		case <-n.stopChan:
-			log.Printf("Node %d: Background execution thread stopping", n.id)
 			return
 		case <-n.execNotify:
 			// New sequence(s) committed, try to execute
@@ -838,11 +807,9 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 	}
 
 	// Mark bootstrap as complete after first real transaction
-	// This ensures NEW-VIEW messages are only logged after bootstrap
 	n.logMu.Lock()
 	if !n.bootstrapComplete {
 		n.bootstrapComplete = true
-		log.Printf("Node %d: Bootstrap complete - now tracking NEW-VIEW messages", n.id)
 	}
 	n.logMu.Unlock()
 
@@ -1238,52 +1205,24 @@ func (n *Node) ShowStatus() {
 }
 
 // SetActive allows external control to activate/deactivate a node
-// This is kept simple to avoid any potential deadlocks
 func (n *Node) SetActive(ctx context.Context, req *pb.SetActiveRequest) (*pb.SetActiveReply, error) {
-	// DIAGNOSTIC: Log immediately when RPC is received
-	log.Printf("Node %d: ⚙️  SetActive RPC RECEIVED: req.Active=%v", n.id, req.Active)
-
 	n.paxosMu.Lock()
-	wasActive := n.isActive
-	n.isActive = req.Active
 	wasLeader := n.isLeader
-	currentLeaderID := n.leaderID
+	n.isActive = req.Active
 
-	log.Printf("Node %d: ⚙️  SetActive PROCESSING: wasActive=%v, nowActive=%v, wasLeader=%v, leaderID=%d",
-		n.id, wasActive, n.isActive, wasLeader, currentLeaderID)
-
-	// BOOTSTRAP FIX: Clear leader state for ALL nodes when going inactive
-	// Each test set should start fresh with no knowledge of previous leaders
 	if !req.Active {
 		n.isLeader = false
-		n.leaderID = -1                          // -1 indicates no known leader (fresh start)
-		n.promisedBallot = types.NewBallot(0, 0) // Clear promised ballot for fresh elections
+		n.leaderID = -1
+		n.promisedBallot = types.NewBallot(0, 0)
 		n.currentBallot = types.NewBallot(0, n.id)
-		log.Printf("Node %d: ⚙️  Set to INACTIVE - clearing ALL leader state (leaderID → -1, ballots → 0)", n.id)
 	}
 
 	currentActive := n.isActive
 	n.paxosMu.Unlock()
 
-	if req.Active {
-		// Node is now active (either newly activated or already was active)
-		if wasActive {
-			log.Printf("Node %d: ✅ Node already ACTIVE", n.id)
-		} else {
-			log.Printf("Node %d: ✅ Node set to ACTIVE (fresh start, no prior leader knowledge)", n.id)
-			// Don't trigger election here - wait for first transaction
-			// The client will send to n1/n4/n7 first, and they will become leaders
-		}
-	} else {
-		log.Printf("Node %d: ⏸️  Node set to INACTIVE (simulating failure)", n.id)
-
-		// Stop heartbeat if was leader
-		if wasLeader {
-			n.stopHeartbeat()
-		}
+	if !req.Active && wasLeader {
+		n.stopHeartbeat()
 	}
-
-	log.Printf("Node %d: ⚙️  SetActive RPC COMPLETED: returning Active=%v", n.id, currentActive)
 
 	return &pb.SetActiveReply{
 		Success: true,
