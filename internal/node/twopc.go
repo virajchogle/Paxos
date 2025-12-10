@@ -824,6 +824,254 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 }
 
 // ============================================================================
+// 2PC CRASH RECOVERY - New Leader Continuation
+// ============================================================================
+
+// Recover2PCTransactions scans for incomplete 2PC transactions after NEW-VIEW
+// and resumes them. Called when a new leader is elected.
+func (n *Node) Recover2PCTransactions() {
+	// Only coordinator cluster (sender cluster) should recover 2PC
+	n.paxosMu.RLock()
+	isLeader := n.isLeader
+	n.paxosMu.RUnlock()
+
+	if !isLeader {
+		return
+	}
+
+	log.Printf("Node %d: 🔄 Scanning for incomplete 2PC transactions...", n.id)
+
+	// Find all PREPARE entries without corresponding COMMIT/ABORT
+	incomplete := n.findIncomplete2PCTransactions()
+
+	if len(incomplete) == 0 {
+		log.Printf("Node %d: ✅ No incomplete 2PC transactions found", n.id)
+		return
+	}
+
+	log.Printf("Node %d: Found %d incomplete 2PC transactions to recover", n.id, len(incomplete))
+
+	// Resume each incomplete 2PC transaction
+	for _, entry := range incomplete {
+		go n.resume2PCTransaction(entry)
+	}
+}
+
+// findIncomplete2PCTransactions scans the log for PREPARE entries without COMMIT/ABORT
+func (n *Node) findIncomplete2PCTransactions() []*types.LogEntry {
+	n.logMu.RLock()
+	defer n.logMu.RUnlock()
+
+	// Build map of txnID -> phases seen
+	txnPhases := make(map[string]map[string]int32) // txnID -> phase -> seq
+
+	for seq, entry := range n.log {
+		if entry == nil || entry.Request == nil || entry.Request.Transaction == nil {
+			continue
+		}
+		if entry.Phase == "" {
+			continue // Not a 2PC entry
+		}
+
+		tx := entry.Request.Transaction
+		// Only process cross-shard transactions where we are the sender cluster (coordinator)
+		senderCluster := n.config.GetClusterForDataItem(tx.Sender)
+		receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+
+		if senderCluster == receiverCluster {
+			continue // Intra-shard, not 2PC
+		}
+		if int(n.clusterID) != senderCluster {
+			continue // We're not the coordinator
+		}
+
+		txnID := fmt.Sprintf("2pc-%s-%d", entry.Request.ClientId, entry.Request.Timestamp)
+
+		if txnPhases[txnID] == nil {
+			txnPhases[txnID] = make(map[string]int32)
+		}
+		txnPhases[txnID][entry.Phase] = seq
+	}
+
+	// Find transactions with PREPARE but no COMMIT or ABORT
+	var incomplete []*types.LogEntry
+	for txnID, phases := range txnPhases {
+		prepareSeq, hasPrepare := phases["P"]
+		_, hasCommit := phases["C"]
+		_, hasAbort := phases["A"]
+
+		if hasPrepare && !hasCommit && !hasAbort {
+			entry := n.log[prepareSeq]
+			if entry != nil {
+				log.Printf("Node %d: Found incomplete 2PC: %s (seq=%d, phase=P only)",
+					n.id, txnID, prepareSeq)
+				incomplete = append(incomplete, entry)
+			}
+		}
+	}
+
+	return incomplete
+}
+
+// resume2PCTransaction resumes an incomplete 2PC transaction
+func (n *Node) resume2PCTransaction(entry *types.LogEntry) {
+	if entry == nil || entry.Request == nil || entry.Request.Transaction == nil {
+		return
+	}
+
+	tx := entry.Request.Transaction
+	clientID := entry.Request.ClientId
+	timestamp := entry.Request.Timestamp
+	txnID := fmt.Sprintf("2pc-%s-%d", clientID, timestamp)
+
+	log.Printf("Node %d: 🔄 Resuming 2PC[%s]: %d → %d", n.id, txnID, tx.Sender, tx.Receiver)
+
+	// Get participant cluster info
+	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
+
+	// Get connection to participant
+	receiverClient, err := n.getCrossClusterClient(int32(receiverLeader))
+	if err != nil {
+		log.Printf("Node %d: 2PC[%s] Recovery: ❌ Cannot connect to participant: %v", n.id, txnID, err)
+		// Can't reach participant - abort locally
+		n.abortRecovered2PC(entry, "participant unreachable")
+		return
+	}
+
+	// Check participant status by sending PREPARE again (idempotent)
+	// If participant already prepared, it will respond with success
+	// If participant doesn't know about it, we need to abort
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	prepareMsg := &pb.TwoPCPrepareRequest{
+		TransactionId: txnID,
+		Transaction:   tx,
+		ClientId:      clientID,
+		Timestamp:     timestamp,
+		CoordinatorId: n.id,
+	}
+
+	log.Printf("Node %d: 2PC[%s] Recovery: Checking participant status...", n.id, txnID)
+	prepareReply, err := receiverClient.TwoPCPrepare(ctx, prepareMsg)
+
+	if err != nil {
+		log.Printf("Node %d: 2PC[%s] Recovery: ❌ Participant error: %v - aborting", n.id, txnID, err)
+		n.abortRecovered2PC(entry, fmt.Sprintf("participant error: %v", err))
+		return
+	}
+
+	if !prepareReply.Success {
+		log.Printf("Node %d: 2PC[%s] Recovery: ❌ Participant not prepared: %s - aborting",
+			n.id, txnID, prepareReply.Message)
+		n.abortRecovered2PC(entry, fmt.Sprintf("participant not prepared: %s", prepareReply.Message))
+		return
+	}
+
+	// Participant is prepared! Complete the COMMIT
+	log.Printf("Node %d: 2PC[%s] Recovery: ✅ Participant is PREPARED - completing COMMIT", n.id, txnID)
+
+	// Run Paxos for COMMIT phase
+	prepareReq := &pb.TransactionRequest{
+		ClientId:    clientID,
+		Timestamp:   timestamp,
+		Transaction: tx,
+	}
+
+	// Get the sequence number from the PREPARE entry
+	prepareSeq := entry.SeqNum
+
+	commitReply, _, err := n.processAsLeaderWithPhaseAndSeq(prepareReq, "C", prepareSeq)
+	if err != nil || commitReply == nil || !commitReply.Success {
+		log.Printf("Node %d: 2PC[%s] Recovery: ❌ COMMIT consensus failed - participant will timeout",
+			n.id, txnID)
+		return
+	}
+
+	// Send COMMIT to participant
+	commitMsg := &pb.TwoPCCommitRequest{
+		TransactionId: txnID,
+		CoordinatorId: n.id,
+	}
+
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer commitCancel()
+
+	commitReply2, err := receiverClient.TwoPCCommit(commitCtx, commitMsg)
+	if err != nil || !commitReply2.Success {
+		log.Printf("Node %d: 2PC[%s] Recovery: ⚠️ Participant COMMIT ACK failed, will retry in background",
+			n.id, txnID)
+		// Background retry for commit
+		go func() {
+			for retry := 0; retry < 5; retry++ {
+				time.Sleep(1 * time.Second)
+				ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+				ack, err := receiverClient.TwoPCCommit(ctx2, commitMsg)
+				cancel2()
+				if err == nil && ack.Success {
+					log.Printf("Node %d: 2PC[%s] Recovery: ✅ Participant ACK after retry", n.id, txnID)
+					return
+				}
+			}
+		}()
+	} else {
+		log.Printf("Node %d: 2PC[%s] Recovery: ✅ Participant COMMITTED", n.id, txnID)
+	}
+
+	// Cleanup coordinator state
+	n.cleanup2PCCoordinator(txnID, true)
+	log.Printf("Node %d: 2PC[%s] Recovery: ✅ Transaction RECOVERED and COMMITTED", n.id, txnID)
+}
+
+// abortRecovered2PC aborts a recovered 2PC transaction that can't be completed
+func (n *Node) abortRecovered2PC(entry *types.LogEntry, reason string) {
+	if entry == nil || entry.Request == nil {
+		return
+	}
+
+	tx := entry.Request.Transaction
+	clientID := entry.Request.ClientId
+	timestamp := entry.Request.Timestamp
+	txnID := fmt.Sprintf("2pc-%s-%d", clientID, timestamp)
+	prepareSeq := entry.SeqNum
+
+	log.Printf("Node %d: 2PC[%s] Recovery: Aborting - %s", n.id, txnID, reason)
+
+	// Run Paxos for ABORT phase
+	abortReq := &pb.TransactionRequest{
+		ClientId:    clientID,
+		Timestamp:   timestamp,
+		Transaction: tx,
+	}
+
+	_, _, err := n.processAsLeaderWithPhaseAndSeq(abortReq, "A", prepareSeq)
+	if err != nil {
+		log.Printf("Node %d: 2PC[%s] Recovery: ⚠️ ABORT consensus failed: %v", n.id, txnID, err)
+	}
+
+	// Send ABORT to participant (best effort)
+	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
+
+	if receiverClient, err := n.getCrossClusterClient(int32(receiverLeader)); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		abortMsg := &pb.TwoPCAbortRequest{
+			TransactionId: txnID,
+			CoordinatorId: n.id,
+			Reason:        reason,
+		}
+		receiverClient.TwoPCAbort(ctx, abortMsg)
+	}
+
+	// Cleanup
+	n.cleanup2PCCoordinator(txnID, false)
+	log.Printf("Node %d: 2PC[%s] Recovery: ✅ Transaction ABORTED", n.id, txnID)
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 

@@ -163,6 +163,13 @@ collectLoop:
 	// leader actions
 	n.resetLeaderTimer()
 	n.startHeartbeat()
+
+	// 2PC Recovery: Check for incomplete 2PC transactions and resume them
+	// Run in background to not block election completion
+	go func() {
+		time.Sleep(500 * time.Millisecond) // Brief wait for NEW-VIEW to propagate
+		n.Recover2PCTransactions()
+	}()
 }
 
 // Prepare handles incoming PREPARE
