@@ -364,7 +364,7 @@ func (m *ClientManager) processNextSet() {
 
 	// Wait for all nodes to become inactive and clear leader state
 	fmt.Printf("⏳ Waiting for all nodes to become inactive...\n")
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// Step 3: Activate ONLY the required nodes for this test set
 	fmt.Printf("✅ Activating nodes %v...\n", set.ActiveNodes)
@@ -404,7 +404,7 @@ func (m *ClientManager) processNextSet() {
 
 	// Give nodes time to elect leader and stabilize
 	fmt.Printf("⏳ Waiting for leader election to complete...\n")
-	time.Sleep(3000 * time.Millisecond) // 3 seconds to allow elections to complete
+	time.Sleep(1000 * time.Millisecond) // 1 second for elections to complete
 
 	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
 
