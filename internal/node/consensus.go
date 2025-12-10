@@ -258,6 +258,21 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*pb.BalanceQueryReply, error) {
 	dataItemID := req.DataItemId
 
+	// Check if node is active
+	n.paxosMu.RLock()
+	active := n.isActive
+	n.paxosMu.RUnlock()
+
+	if !active {
+		return &pb.BalanceQueryReply{
+			Success:   false,
+			Balance:   0,
+			Message:   "Node is inactive",
+			NodeId:    n.id,
+			ClusterId: n.clusterID,
+		}, nil
+	}
+
 	// Check if this node's cluster owns this data item (no lock needed - config is read-only)
 	cluster := int32(n.config.GetClusterForDataItem(dataItemID))
 	if cluster != n.clusterID {
@@ -374,7 +389,7 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 		wg.Add(1)
 		go func(peerID int32, c pb.PaxosNodeClient) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			resp, err := c.Accept(ctx, acceptReq)
 			if err == nil && resp.Success {
@@ -421,7 +436,7 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 	}
 	for pid, cli := range peers {
 		go func(peerID int32, c pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			_, _ = c.Commit(ctx, commitReq)
 		}(pid, cli)
@@ -961,10 +976,12 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		}
 		n.logMu.Unlock()
 
-		// Save only the changed balance (FAST! ~3-8ms)
-		if err := n.saveBalance(changedItemID, newBalance); err != nil {
-			log.Printf("Node %d: ⚠️  Warning - failed to save balance: %v", n.id, err)
-		}
+		// Save only the changed balance (ASYNC for performance)
+		go func(itemID, balance int32) {
+			if err := n.saveBalance(itemID, balance); err != nil {
+				log.Printf("Node %d: ⚠️  Warning - failed to save balance: %v", n.id, err)
+			}
+		}(changedItemID, newBalance)
 
 		// Record access pattern (no locks needed)
 		n.RecordTransactionAccess(sender, recv, isCrossShard)
@@ -1053,13 +1070,15 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 		log.Printf("Node %d: ⚠️  Warning - failed to commit WAL: %v", n.id, err)
 	}
 
-	// Save only changed balances (FAST! ~3-8ms per item)
-	if err := n.saveBalance(sender, newSenderBalance); err != nil {
-		log.Printf("Node %d: ⚠️  Warning - failed to save sender balance: %v", n.id, err)
-	}
-	if err := n.saveBalance(recv, newRecvBalance); err != nil {
-		log.Printf("Node %d: ⚠️  Warning - failed to save receiver balance: %v", n.id, err)
-	}
+	// Save only changed balances (ASYNC for performance)
+	go func() {
+		if err := n.saveBalance(sender, newSenderBalance); err != nil {
+			log.Printf("Node %d: ⚠️  Warning - failed to save sender balance: %v", n.id, err)
+		}
+		if err := n.saveBalance(recv, newRecvBalance); err != nil {
+			log.Printf("Node %d: ⚠️  Warning - failed to save receiver balance: %v", n.id, err)
+		}
+	}()
 
 	return pb.ResultType_SUCCESS
 }
