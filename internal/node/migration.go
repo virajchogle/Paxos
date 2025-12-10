@@ -392,37 +392,36 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 		}, nil
 	}
 
-	// Build hypergraph from access patterns
+	// Build SIMPLE GRAPH from access patterns
 	numClusters := int32(len(n.config.Clusters))
-	totalItems := int32(n.config.Data.TotalItems)
 
-	hg := redistribution.NewHypergraph(numClusters, totalItems)
+	graph := redistribution.NewSimpleGraph(numClusters, 0)
 
 	// Add vertices for all items in local shard
 	itemAccess := n.accessTracker.GetItemAccessMap()
 	for itemID, count := range itemAccess {
 		currentCluster := int32(n.config.GetClusterForDataItem(itemID))
-		hg.AddVertex(itemID, count, currentCluster)
+		graph.AddVertex(itemID, count, currentCluster)
 	}
 
-	// Add hyperedges from co-access patterns
+	// Add edges from co-access patterns (simple graph: each edge is between 2 items)
 	coAccess := n.accessTracker.GetCoAccessMatrix()
 	for pair, count := range coAccess {
-		hg.AddHyperedge([]int32{pair.First, pair.Second}, count)
+		graph.AddEdge(pair.First, pair.Second, count)
 	}
 
-	// Configure partitioner
-	config := redistribution.DefaultPartitionConfig()
+	// Configure simple partitioner
+	config := redistribution.DefaultSimplePartitionConfig()
 	if req.MinGain > 0 {
 		config.MinGain = int64(req.MinGain)
 	}
 	if req.MaxImbalance > 0 {
-		config.MaxImbalance = req.MaxImbalance
+		config.MaxImbalance = float64(req.MaxImbalance)
 	}
 	config.Verbose = true
 
-	// Run partitioning
-	partitioner := redistribution.NewPartitioner(hg, config)
+	// Run SIMPLE GRAPH partitioning
+	partitioner := redistribution.NewSimplePartitioner(graph, config)
 	result, err := partitioner.Partition()
 	if err != nil {
 		return &pb.TriggerRebalanceReply{
@@ -467,7 +466,8 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 	return reply, nil
 }
 
-// PrintReshard triggers resharding and outputs triplets (item_id, from_cluster, to_cluster)
+// PrintReshard triggers resharding using SIMPLE GRAPH PARTITIONING
+// and outputs triplets (item_id, from_cluster, to_cluster)
 func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*pb.PrintReshardReply, error) {
 	log.Printf("Node %d: 📝 PrintReshard requested (execute=%v)", n.id, req.Execute)
 
@@ -492,34 +492,34 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 		}, nil
 	}
 
-	// Build hypergraph from access patterns
+	// Build SIMPLE GRAPH from access patterns
 	numClusters := int32(len(n.config.Clusters))
 	totalItems := int32(n.config.Data.TotalItems)
 
-	hg := redistribution.NewHypergraph(numClusters, totalItems)
+	graph := redistribution.NewSimpleGraph(numClusters, totalItems)
 
 	// Add vertices for all items
 	itemAccess := n.accessTracker.GetItemAccessMap()
 	for itemID, count := range itemAccess {
 		currentCluster := int32(n.config.GetClusterForDataItem(itemID))
-		hg.AddVertex(itemID, count, currentCluster)
+		graph.AddVertex(itemID, count, currentCluster)
 	}
 
-	// Add hyperedges from co-access patterns
+	// Add edges from co-access patterns (simple graph: each edge is between 2 items)
 	coAccess := n.accessTracker.GetCoAccessMatrix()
 	for pair, count := range coAccess {
-		hg.AddHyperedge([]int32{pair.First, pair.Second}, count)
+		graph.AddEdge(pair.First, pair.Second, count)
 	}
 
-	// Configure partitioner
-	config := redistribution.DefaultPartitionConfig()
+	// Configure simple partitioner
+	config := redistribution.DefaultSimplePartitionConfig()
 	if req.MinGain > 0 {
 		config.MinGain = int64(req.MinGain)
 	}
 	config.Verbose = true
 
-	// Run partitioning
-	partitioner := redistribution.NewPartitioner(hg, config)
+	// Run SIMPLE GRAPH partitioning
+	partitioner := redistribution.NewSimplePartitioner(graph, config)
 	result, err := partitioner.Partition()
 	if err != nil {
 		return &pb.PrintReshardReply{
@@ -540,18 +540,19 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 
 	// Output triplets to log
 	log.Printf("========== RESHARD RESULTS (Node %d) ==========", n.id)
-	log.Printf("Initial edge cut: %d", result.InitialCut)
+	log.Printf("Using: SIMPLE GRAPH PARTITIONING")
+	log.Printf("Initial edge cut: %d (cross-shard transactions)", result.InitialCut)
 	log.Printf("Final edge cut: %d", result.FinalCut)
 	log.Printf("Cut reduction: %.2f%%", result.CutReduction*100)
 	log.Printf("Items to move: %d", len(triplets))
 	log.Printf("")
-	log.Printf("Migration triplets:")
+	log.Printf("Migration triplets (item_id, from_cluster, to_cluster):")
 	for _, t := range triplets {
 		log.Printf("  (%d, c%d, c%d)", t.ItemId, t.FromCluster, t.ToCluster)
 	}
 	log.Printf("===============================================")
 
-	message := fmt.Sprintf("Resharding complete: %d items to move, %.2f%% reduction",
+	message := fmt.Sprintf("Resharding complete: %d items to move, %.2f%% cross-shard reduction",
 		len(triplets), result.CutReduction*100)
 
 	if req.Execute {

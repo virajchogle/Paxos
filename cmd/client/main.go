@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"paxos-banking/internal/config"
+	"paxos-banking/internal/redistribution"
 	"paxos-banking/internal/utils"
 	pb "paxos-banking/proto"
 )
@@ -31,6 +32,17 @@ type ClientManager struct {
 	config         *config.Config  // Store config for cluster lookups
 	mu             sync.Mutex      // Protect currentLeader and clusterLeaders
 	pendingQueue   []utils.Command // Queue for commands that failed due to no quorum
+
+	// Transaction history for resharding analysis
+	txnHistoryMu sync.Mutex
+	txnHistory   []TransactionRecord
+}
+
+// TransactionRecord records a transaction for resharding analysis
+type TransactionRecord struct {
+	Sender   int32
+	Receiver int32
+	IsCross  bool // Was it a cross-shard transaction?
 }
 
 type Client struct {
@@ -247,6 +259,12 @@ func (m *ClientManager) processNextSet() {
 		fmt.Println("No more test sets")
 		return
 	}
+
+	// Clear transaction history for this new test set
+	// (printreshard should only analyze transactions from current test set)
+	m.txnHistoryMu.Lock()
+	m.txnHistory = nil
+	m.txnHistoryMu.Unlock()
 
 	// BOOTSTRAP: Treat every test set as a fresh start
 	// This prevents split-brain issues and ensures clean leader elections
@@ -747,6 +765,10 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 		m.mu.Unlock()
 	}
 
+	// Record ALL attempted transactions for resharding analysis
+	// (even failed ones represent co-access patterns that would benefit from resharding)
+	m.recordTransaction(sender, receiver, isCrossShard)
+
 	// Check if transaction actually succeeded
 	if resp == nil {
 		return fmt.Errorf("no response received")
@@ -757,6 +779,23 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 	}
 
 	return nil
+}
+
+// recordTransaction records a transaction for resharding analysis
+func (m *ClientManager) recordTransaction(sender, receiver int32, isCross bool) {
+	m.txnHistoryMu.Lock()
+	defer m.txnHistoryMu.Unlock()
+
+	m.txnHistory = append(m.txnHistory, TransactionRecord{
+		Sender:   sender,
+		Receiver: receiver,
+		IsCross:  isCross,
+	})
+
+	// Keep history bounded (last 100K transactions)
+	if len(m.txnHistory) > 100000 {
+		m.txnHistory = m.txnHistory[len(m.txnHistory)-100000:]
+	}
 }
 
 // sendTransaction is kept for backward compatibility and single transaction sends
@@ -1257,54 +1296,119 @@ func (m *ClientManager) printViewAllNodes() {
 	fmt.Println()
 }
 
-// printReshard implements PrintReshard - trigger resharding
+// printReshard implements PrintReshard using CLIENT-SIDE SIMPLE GRAPH PARTITIONING
+// This is a centralized approach where the client analyzes transaction history
 func (m *ClientManager) printReshard() {
-	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  PrintReshard - Triggering Shard Redistribution      ║\n")
-	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+	fmt.Printf("\n╔════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  PrintReshard - Client-Side Simple Graph Partitioning            ║\n")
+	fmt.Printf("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	// Send to leader of cluster 1 (or any leader)
-	var leaderClient pb.PaxosNodeClient
-	var leaderID int32
+	m.txnHistoryMu.Lock()
+	txnCount := len(m.txnHistory)
+	history := make([]TransactionRecord, txnCount)
+	copy(history, m.txnHistory)
+	m.txnHistoryMu.Unlock()
 
-	for clusterID, nodeID := range m.clusterLeaders {
-		if client, exists := m.nodeClients[nodeID]; exists {
-			leaderClient = client
-			leaderID = nodeID
-			fmt.Printf("Using node %d (Cluster %d leader) for resharding\n", nodeID, clusterID)
-			break
+	if txnCount == 0 {
+		fmt.Println("❌ No transaction history available for analysis")
+		fmt.Println("   Run some transactions first, then call printreshard again")
+		return
+	}
+
+	fmt.Printf("\n📊 Analyzing %d transactions...\n\n", txnCount)
+
+	// Count cross-shard transactions in history
+	crossCount := 0
+	for _, txn := range history {
+		if txn.IsCross {
+			crossCount++
+		}
+	}
+	fmt.Printf("Current cross-shard transactions: %d (%.1f%%)\n",
+		crossCount, float64(crossCount)/float64(txnCount)*100)
+
+	// Build simple graph from transaction history
+	numClusters := int32(len(m.config.Clusters))
+	graph := redistribution.NewSimpleGraph(numClusters, 0)
+
+	// Count transactions between item pairs and item access counts
+	edgeWeights := make(map[string]int64)
+	itemCounts := make(map[int32]int64)
+
+	for _, txn := range history {
+		itemCounts[txn.Sender]++
+		itemCounts[txn.Receiver]++
+
+		// Create edge key (smaller ID first)
+		var key string
+		if txn.Sender < txn.Receiver {
+			key = fmt.Sprintf("%d-%d", txn.Sender, txn.Receiver)
+		} else {
+			key = fmt.Sprintf("%d-%d", txn.Receiver, txn.Sender)
+		}
+		edgeWeights[key]++
+	}
+
+	// Add vertices
+	for itemID, count := range itemCounts {
+		partition := m.getClusterForDataItem(itemID)
+		graph.AddVertex(itemID, count, partition)
+	}
+
+	// Add edges
+	for key, weight := range edgeWeights {
+		var from, to int32
+		fmt.Sscanf(key, "%d-%d", &from, &to)
+		graph.AddEdge(from, to, weight)
+	}
+
+	fmt.Printf("Graph: %d vertices, %d edges\n\n", len(graph.Vertices), len(graph.Edges))
+
+	// Configure simple partitioner
+	config := redistribution.DefaultSimplePartitionConfig()
+	config.MinGain = 1
+	config.Verbose = false // We'll print our own output
+
+	// Run simple graph partitioning
+	partitioner := redistribution.NewSimplePartitioner(graph, config)
+	result, err := partitioner.Partition()
+	if err != nil {
+		fmt.Printf("❌ Partitioning failed: %v\n", err)
+		return
+	}
+
+	// Display results
+	fmt.Printf("═══════════════════════════════════════════════════════════════════\n")
+	fmt.Printf("                    RESHARDING RESULTS\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════════════\n")
+	fmt.Printf("Initial edge cut (cross-shard txns): %d\n", result.InitialCut)
+	fmt.Printf("Final edge cut (after resharding):   %d\n", result.FinalCut)
+	fmt.Printf("Cross-shard reduction:               %.2f%%\n", result.CutReduction*100)
+	fmt.Printf("Iterations:                          %d\n", result.Iterations)
+	fmt.Printf("Items to move:                       %d\n\n", len(result.Moves))
+
+	if len(result.Moves) == 0 {
+		fmt.Println("✅ No items need to be moved - current partitioning is optimal!")
+	} else {
+		fmt.Printf("Migration Triplets (item_id, from_cluster, to_cluster):\n")
+		fmt.Printf("───────────────────────────────────────────────────────\n")
+		for _, move := range result.Moves {
+			fmt.Printf("  (%d, c%d, c%d)  [gain: %d]\n",
+				move.ItemID, move.FromCluster, move.ToCluster, move.Gain)
 		}
 	}
 
-	if leaderClient == nil {
-		fmt.Println("❌ No leader available")
-		return
+	// Show items analyzed per cluster (only items involved in transactions)
+	fmt.Printf("\nItems analyzed from this test set (by current cluster):\n")
+	for part := int32(1); part <= numClusters; part++ {
+		size := graph.PartitionSizes[part]
+		if size > 0 {
+			fmt.Printf("  Cluster %d: %d items involved in transactions\n", part, size)
+		}
 	}
+	fmt.Printf("  (Note: Full clusters have 3000 items each; only accessed items are analyzed)\n")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := leaderClient.PrintReshard(ctx, &pb.PrintReshardRequest{
-		Execute: false, // Dry run
-		MinGain: 1,
-	})
-
-	if err != nil {
-		fmt.Printf("❌ PrintReshard failed: %v\n", err)
-		return
-	}
-
-	if !resp.Success {
-		fmt.Printf("❌ PrintReshard failed: %s\n", resp.Message)
-		return
-	}
-
-	fmt.Printf("\n%s\n", resp.Message)
-	fmt.Printf("\nTriplets (item_id, from_cluster, to_cluster):\n")
-	for _, t := range resp.Triplets {
-		fmt.Printf("  (%d, c%d, c%d)\n", t.ItemId, t.FromCluster, t.ToCluster)
-	}
-	fmt.Printf("\n(Check node %d logs for detailed analysis)\n\n", leaderID)
+	fmt.Printf("═══════════════════════════════════════════════════════════════════\n\n")
 }
 
 // flushAllNodes implements Flush - reset all node state
