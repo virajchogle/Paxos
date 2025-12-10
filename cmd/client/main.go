@@ -192,6 +192,7 @@ func (m *ClientManager) runInteractive() {
 	fmt.Println("╚══════════════════════════════════════════════╝")
 	fmt.Println("\nCommands:")
 	fmt.Println("  next           - Process next test set")
+	fmt.Println("  repeat         - Repeat the last test set")
 	fmt.Println("  skip           - Skip next test set")
 	fmt.Println("  status         - Show current status")
 	fmt.Println("  leader         - Show current leader")
@@ -225,6 +226,8 @@ func (m *ClientManager) runInteractive() {
 		switch parts[0] {
 		case "next":
 			m.processNextSet()
+		case "repeat":
+			m.repeatLastSet()
 		case "skip":
 			m.skipNextSet()
 		case "status":
@@ -273,6 +276,21 @@ func (m *ClientManager) runInteractive() {
 			fmt.Printf("Unknown command: %s (type 'help' for commands)\n", parts[0])
 		}
 	}
+}
+
+// repeatLastSet repeats the last processed test set
+func (m *ClientManager) repeatLastSet() {
+	if m.currentSet == 0 {
+		fmt.Println("No test set has been processed yet. Use 'next' first.")
+		return
+	}
+
+	// Decrement to go back to the last processed set
+	m.currentSet--
+	fmt.Printf("🔁 Repeating Test Set %d...\n", m.testSets[m.currentSet].SetNumber)
+
+	// Call processNextSet which will increment currentSet back and process
+	m.processNextSet()
 }
 
 // skipNextSet skips the next test set without processing (per project spec)
@@ -1143,6 +1161,10 @@ func (m *ClientManager) showHelp() {
 	fmt.Println("  next")
 	fmt.Println("    Process the next test set from CSV file")
 	fmt.Println("    Transactions are sent sequentially")
+	fmt.Println()
+	fmt.Println("  repeat")
+	fmt.Println("    Repeat the last test set (re-run same transactions)")
+	fmt.Println("    Useful for testing determinism or debugging")
 	fmt.Println()
 	fmt.Println("  status")
 	fmt.Println("    Show current progress and test set info")
