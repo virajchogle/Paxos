@@ -145,6 +145,14 @@ type Node struct {
 	migrationState *MigrationState
 }
 
+// getCheckpointInterval returns checkpoint interval from config or default (100)
+func getCheckpointInterval(cfg *config.Config) int32 {
+	if cfg.Data.CheckpointInterval > 0 {
+		return cfg.Data.CheckpointInterval
+	}
+	return 100 // Default: checkpoint every 100 transactions
+}
+
 func NewNode(id int32, cfg *config.Config) (*Node, error) {
 	// jittered timeout - use milliseconds for leader election
 	// OPTIMIZED FOR HIGH THROUGHPUT (5000+ TPS target)
@@ -171,8 +179,8 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		newViewLog:         make([]*pb.NewViewRequest, 0),
 		clientLastReply:    make(map[string]*pb.TransactionReply),
 		clientLastTS:       make(map[string]int64),
-		balances:           make(map[int32]int32),                   // Changed to int32 -> int32
-		checkpointInterval: 100,                                     // Checkpoint every 100 transactions
+		balances:           make(map[int32]int32), // Changed to int32 -> int32
+		checkpointInterval: getCheckpointInterval(cfg),
 		modifiedItems:      make(map[int32]bool),                    // Track modified items
 		locks:              make(map[int32]*DataItemLock),           // Initialize lock table
 		lockTimeout:        100 * time.Millisecond,                  // Was 2s - now 100ms for performance
@@ -240,6 +248,11 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 			id, clusterID, len(n.balances), cluster.ShardStart, cluster.ShardEnd, cfg.Data.InitialBalance)
 	} else {
 		log.Printf("Node %d: ✅ Loaded %d items from PebbleDB", id, len(n.balances))
+	}
+
+	// Load checkpoint if exists (restores balances and lastExecuted)
+	if err := n.loadCheckpoint(); err != nil {
+		log.Printf("Node %d: ⚠️ Failed to load checkpoint: %v", id, err)
 	}
 
 	log.Printf("Node %d (Cluster %d): Timer set to %v (base: 100ms + jitter: %v)",

@@ -37,3 +37,4 @@ nodes:
 data:
   total_items: 9000
   initial_balance: 100000
+  checkpoint_interval: 100  # Checkpoint every N transactions (default: 100)

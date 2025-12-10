@@ -22,6 +22,12 @@ func (n *Node) setBalance(itemID int32, balance int32) {
 	n.balanceMu.Unlock()
 
 	// Track as modified for checkpointing
+	n.trackModifiedItem(itemID)
+}
+
+// trackModifiedItem marks an item as modified for checkpointing
+// Call this after modifying a balance (can be called without holding balanceMu)
+func (n *Node) trackModifiedItem(itemID int32) {
 	n.checkpointMu.Lock()
 	n.modifiedItems[itemID] = true
 	n.checkpointMu.Unlock()

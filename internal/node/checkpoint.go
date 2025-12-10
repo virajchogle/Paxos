@@ -227,6 +227,7 @@ func (n *Node) loadCheckpoint() error {
 	seqValue, closer, err := n.pebbleDB.Get(seqKey)
 	if err != nil {
 		// No checkpoint exists yet
+		log.Printf("Node %d: No checkpoint found (starting fresh)", n.id)
 		return nil
 	}
 	defer closer.Close()
@@ -235,6 +236,7 @@ func (n *Node) loadCheckpoint() error {
 	fmt.Sscanf(string(seqValue), "%d", &checkpointSeq)
 
 	if checkpointSeq == 0 {
+		log.Printf("Node %d: No checkpoint found (seq=0)", n.id)
 		return nil // No checkpoint
 	}
 
@@ -266,20 +268,36 @@ func (n *Node) loadCheckpoint() error {
 		checkpointState[itemID] = balance
 	}
 
-	// Apply checkpoint
+	// Apply checkpoint to checkpoint state
 	n.checkpointMu.Lock()
 	n.lastCheckpointSeq = checkpointSeq
 	n.checkpointedBalance = checkpointState
+	// Also restore modifiedItems tracking
+	n.modifiedItems = make(map[int32]bool)
+	for itemID := range checkpointState {
+		n.modifiedItems[itemID] = true
+	}
 	n.checkpointMu.Unlock()
+
+	// Apply checkpoint balances to actual balances
+	n.balanceMu.Lock()
+	for itemID, balance := range checkpointState {
+		n.balances[itemID] = balance
+	}
+	n.balanceMu.Unlock()
 
 	// Update lastExecuted to checkpoint seq
 	n.logMu.Lock()
 	if n.lastExecuted < checkpointSeq {
 		n.lastExecuted = checkpointSeq
 	}
+	// Also update nextSeqNum if needed
+	if n.nextSeqNum <= checkpointSeq {
+		n.nextSeqNum = checkpointSeq + 1
+	}
 	n.logMu.Unlock()
 
-	log.Printf("Node %d: 📸 Loaded checkpoint from disk (seq=%d, %d items)",
-		n.id, checkpointSeq, len(checkpointState))
+	log.Printf("Node %d: 📸 Loaded checkpoint from disk (seq=%d, %d items, lastExecuted=%d)",
+		n.id, checkpointSeq, len(checkpointState), checkpointSeq)
 	return nil
 }

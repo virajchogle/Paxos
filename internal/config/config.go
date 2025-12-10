@@ -28,8 +28,9 @@ type NodeConfig struct {
 }
 
 type DataConfig struct {
-	TotalItems     int   `yaml:"total_items"`
-	InitialBalance int32 `yaml:"initial_balance"`
+	TotalItems         int   `yaml:"total_items"`
+	InitialBalance     int32 `yaml:"initial_balance"`
+	CheckpointInterval int32 `yaml:"checkpoint_interval"` // Checkpoint every N transactions (default: 100)
 }
 
 func LoadConfig(filename string) (*Config, error) {

@@ -770,6 +770,9 @@ func (n *Node) backgroundExecutionThread() {
 			}
 			n.lastExecuted = nextSeq
 			n.logMu.Unlock()
+
+			// Check if we should create a checkpoint (every N transactions)
+			n.createCheckpointIfNeeded()
 		}
 	}
 }
@@ -910,6 +913,9 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 		newBalance := n.balances[changedItemID]
 		n.balanceMu.Unlock()
 
+		// Track modified item for checkpointing
+		n.trackModifiedItem(changedItemID)
+
 		// Save balance async
 		go n.saveBalance(changedItemID, newBalance)
 
@@ -943,6 +949,10 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 	newSenderBalance := n.balances[sender]
 	newRecvBalance := n.balances[recv]
 	n.balanceMu.Unlock()
+
+	// Track modified items for checkpointing
+	n.trackModifiedItem(sender)
+	n.trackModifiedItem(recv)
 
 	// WAL for rollback support
 	txnID := fmt.Sprintf("txn-%s-%d", clientID, timestamp)
