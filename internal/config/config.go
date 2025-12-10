@@ -120,3 +120,113 @@ func (c *Config) GetLeaderNodeForCluster(clusterID int) int32 {
 	}
 	return 0
 }
+
+// ============================================================================
+// CONFIGURABLE CLUSTERS SUPPORT (Bonus Feature)
+// ============================================================================
+
+// GetNumClusters returns the total number of clusters
+func (c *Config) GetNumClusters() int {
+	return len(c.Clusters)
+}
+
+// GetTotalNodes returns the total number of nodes across all clusters
+func (c *Config) GetTotalNodes() int {
+	return len(c.Nodes)
+}
+
+// GetNodesPerCluster returns the number of nodes in a specific cluster
+func (c *Config) GetNodesPerCluster(clusterID int) int {
+	if cluster, exists := c.Clusters[clusterID]; exists {
+		return len(cluster.Nodes)
+	}
+	return 0
+}
+
+// GetAllClusterIDs returns all cluster IDs in sorted order
+func (c *Config) GetAllClusterIDs() []int {
+	ids := make([]int, 0, len(c.Clusters))
+	for id := range c.Clusters {
+		ids = append(ids, id)
+	}
+	// Sort for consistent ordering
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			if ids[i] > ids[j] {
+				ids[i], ids[j] = ids[j], ids[i]
+			}
+		}
+	}
+	return ids
+}
+
+// GetAllNodeIDs returns all node IDs in sorted order
+func (c *Config) GetAllNodeIDs() []int32 {
+	ids := make([]int32, 0, len(c.Nodes))
+	for id := range c.Nodes {
+		ids = append(ids, int32(id))
+	}
+	// Sort for consistent ordering
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			if ids[i] > ids[j] {
+				ids[i], ids[j] = ids[j], ids[i]
+			}
+		}
+	}
+	return ids
+}
+
+// GetClusterRange returns the shard range for a cluster
+func (c *Config) GetClusterRange(clusterID int) (start, end int32) {
+	if cluster, exists := c.Clusters[clusterID]; exists {
+		return cluster.ShardStart, cluster.ShardEnd
+	}
+	return 0, 0
+}
+
+// GetExpectedLeaders returns a map of clusterID -> expected leader nodeID
+func (c *Config) GetExpectedLeaders() map[int32]int32 {
+	leaders := make(map[int32]int32)
+	for clusterID, cluster := range c.Clusters {
+		if len(cluster.Nodes) > 0 {
+			leaders[int32(clusterID)] = int32(cluster.Nodes[0])
+		}
+	}
+	return leaders
+}
+
+// GetMinNodeID returns the minimum node ID
+func (c *Config) GetMinNodeID() int32 {
+	minID := int32(0)
+	first := true
+	for id := range c.Nodes {
+		if first || int32(id) < minID {
+			minID = int32(id)
+			first = false
+		}
+	}
+	return minID
+}
+
+// GetMaxNodeID returns the maximum node ID
+func (c *Config) GetMaxNodeID() int32 {
+	maxID := int32(0)
+	for id := range c.Nodes {
+		if int32(id) > maxID {
+			maxID = int32(id)
+		}
+	}
+	return maxID
+}
+
+// GetTotalDataItems returns the total number of data items
+func (c *Config) GetTotalDataItems() int {
+	return c.Data.TotalItems
+}
+
+// IsValidNodeID checks if a node ID exists in the configuration
+func (c *Config) IsValidNodeID(nodeID int) bool {
+	_, exists := c.Nodes[nodeID]
+	return exists
+}

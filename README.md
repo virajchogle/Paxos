@@ -106,6 +106,55 @@ data:
   checkpoint_interval: 100  # Checkpoint every 100 transactions
 ```
 
+### Configurable Clusters (Bonus Feature)
+
+The system supports configurable number of clusters and nodes per cluster. The **9000 data items** (per project spec) are automatically divided among the clusters. Use the `configgen` tool to generate custom configurations:
+
+```bash
+# Generate config for 4 clusters with 5 nodes each (20 total nodes, 2250 items/cluster)
+./bin/configgen -clusters=4 -nodes-per-cluster=5
+
+# Generate config for 5 clusters with 3 nodes each (15 total nodes, 1800 items/cluster)
+./bin/configgen -clusters=5 -nodes-per-cluster=3
+
+# Start nodes with custom configuration
+CONFIG_FILE=config/nodes.yaml ./scripts/start_nodes.sh
+```
+
+**configgen Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-clusters` | 3 | Number of clusters |
+| `-nodes-per-cluster` | 3 | Nodes per cluster |
+| `-items` | 9000 | Total data items (per project spec) |
+| `-base-port` | 50051 | Starting port number |
+| `-initial-balance` | 10 | Initial balance per item |
+| `-output` | config/nodes.yaml | Output file path |
+
+**Example Configurations:**
+
+```bash
+# 4 clusters × 5 nodes = 20 nodes (9000 items ÷ 4 = 2250 items/cluster)
+./bin/configgen -clusters=4 -nodes-per-cluster=5
+# Cluster 1: Nodes 1-5,   Items 1-2250
+# Cluster 2: Nodes 6-10,  Items 2251-4500
+# Cluster 3: Nodes 11-15, Items 4501-6750
+# Cluster 4: Nodes 16-20, Items 6751-9000
+
+# 2 clusters × 4 nodes = 8 nodes (9000 items ÷ 2 = 4500 items/cluster)
+./bin/configgen -clusters=2 -nodes-per-cluster=4
+
+# 6 clusters × 2 nodes = 12 nodes (9000 items ÷ 6 = 1500 items/cluster)
+./bin/configgen -clusters=6 -nodes-per-cluster=2
+```
+
+The generated configuration automatically:
+- Divides 9000 data items evenly across clusters
+- Assigns consecutive node IDs starting from 1
+- Creates proper shard ranges for each cluster
+- First node in each cluster becomes the expected leader
+
 ## Project Structure
 
 ```

@@ -39,12 +39,19 @@ func (sw *syncWriter) Write(p []byte) (n int, err error) {
 }
 
 func main() {
-	nodeID := flag.Int("id", 1, "Node ID (1-9)")
+	nodeID := flag.Int("id", 1, "Node ID")
 	configFile := flag.String("config", "config/nodes.yaml", "Config file")
 	flag.Parse()
 
-	if *nodeID < 1 || *nodeID > 9 {
-		log.Fatal("Node ID must be between 1 and 9")
+	// Load config first to validate node ID dynamically
+	cfg, err := config.LoadConfig(*configFile)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Validate node ID against the actual configuration (supports configurable clusters)
+	if !cfg.IsValidNodeID(*nodeID) {
+		log.Fatalf("Node ID %d not found in configuration. Valid node IDs: %v", *nodeID, cfg.GetAllNodeIDs())
 	}
 
 	// Set up file logging for this node with immediate flushing
@@ -64,11 +71,7 @@ func main() {
 	os.Stderr = logFile
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	cfg, err := config.LoadConfig(*configFile)
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-
+	// cfg was already loaded above for validation (configurable clusters support)
 	n, err := node.NewNode(int32(*nodeID), cfg)
 	if err != nil {
 		log.Fatalf("Failed to create node: %v", err)

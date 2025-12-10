@@ -1,5 +1,7 @@
 #!/bin/bash
 
+CLEAN_DATA="${CLEAN_DATA:-true}"
+
 echo "Stopping all Paxos processes..."
 
 pkill -f "bin/node" 2>/dev/null && echo "Stopped nodes" || echo "No nodes running"
@@ -22,5 +24,17 @@ end tell
 EOF
 fi
 
-rm -f logs/*.pid
+# Clean up data and logs for fresh start
+if [ "$CLEAN_DATA" = "true" ]; then
+    echo "Cleaning up logs and data..."
+    rm -rf logs/*.log logs/*.pid 2>/dev/null
+    rm -rf data/node*_pebble 2>/dev/null
+    rm -rf data/node*_db.json data/node*_wal.json 2>/dev/null
+    echo "✅ Cleaned logs/ and data/ directories"
+else
+    rm -f logs/*.pid
+fi
+
 echo "Done!"
+echo ""
+echo "To preserve data on stop, use: CLEAN_DATA=false ./scripts/stop_all.sh"

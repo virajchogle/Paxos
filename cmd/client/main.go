@@ -114,10 +114,13 @@ func main() {
 	// No longer need individual clients per data item (changed from string client IDs to int32 data item IDs)
 	// Transactions now reference data item IDs (1-9000) directly
 
-	// Connect to all 9 nodes across 3 clusters
-	fmt.Println("Connecting to nodes...")
-	for nodeID := 1; nodeID <= 9; nodeID++ {
-		address := cfg.GetNodeAddress(nodeID)
+	// Connect to all nodes across all clusters (supports configurable clusters)
+	totalNodes := cfg.GetTotalNodes()
+	numClusters := cfg.GetNumClusters()
+	fmt.Printf("Connecting to %d nodes across %d clusters...\n", totalNodes, numClusters)
+
+	for _, nodeID := range cfg.GetAllNodeIDs() {
+		address := cfg.GetNodeAddress(int(nodeID))
 
 		conn, err := grpc.NewClient(address,
 			grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -127,7 +130,7 @@ func main() {
 			continue
 		}
 
-		mgr.nodeClients[int32(nodeID)] = pb.NewPaxosNodeClient(conn)
+		mgr.nodeClients[nodeID] = pb.NewPaxosNodeClient(conn)
 		fmt.Printf("✓ Connected to node %d\n", nodeID)
 	}
 
@@ -338,8 +341,8 @@ func (m *ClientManager) processNextSet() {
 		fmt.Printf("⚠️  No quorum (%d nodes)\n", len(set.ActiveNodes))
 	}
 
-	// Bootstrap: deactivate all, then activate required nodes
-	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+	// Bootstrap: deactivate all, then activate required nodes (supports configurable clusters)
+	for _, nodeID := range m.config.GetAllNodeIDs() {
 		m.setNodeActive(nodeID, false)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -348,17 +351,20 @@ func (m *ClientManager) processNextSet() {
 		m.setNodeActive(nodeID, true)
 	}
 
-	// Trigger elections on expected leaders
+	// Trigger elections on expected leaders (supports configurable clusters)
 	activeMap := make(map[int32]bool)
 	for _, nodeID := range set.ActiveNodes {
 		activeMap[nodeID] = true
 	}
-	expectedLeaders := map[int32]int32{1: 1, 4: 3001, 7: 6001}
-	for leaderID, dataItem := range expectedLeaders {
+	// Build expected leaders dynamically from config
+	expectedLeaders := m.config.GetExpectedLeaders()
+	for clusterID, leaderID := range expectedLeaders {
 		if activeMap[leaderID] {
 			if nodeClient, exists := m.nodeClients[leaderID]; exists {
+				// Get first data item in this cluster's shard
+				start, _ := m.config.GetClusterRange(int(clusterID))
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				nodeClient.QueryBalance(ctx, &pb.BalanceQueryRequest{DataItemId: dataItem})
+				nodeClient.QueryBalance(ctx, &pb.BalanceQueryRequest{DataItemId: start})
 				cancel()
 			}
 		}
@@ -1178,9 +1184,12 @@ func (m *ClientManager) printBalanceAllNodes(dataItemIDStr string) {
 	fmt.Printf("%s\n", output)
 }
 
-// printDBAllNodes implements PrintDB - query all 9 nodes in parallel
+// printDBAllNodes implements PrintDB - query all nodes in parallel (supports configurable clusters)
 func (m *ClientManager) printDBAllNodes() {
-	fmt.Println("\nPrintDB - Modified balances on all nodes:")
+	totalNodes := m.config.GetTotalNodes()
+	allNodeIDs := m.config.GetAllNodeIDs()
+
+	fmt.Printf("\nPrintDB - Modified balances on all %d nodes:\n", totalNodes)
 
 	type nodeDB struct {
 		nodeID    int32
@@ -1189,10 +1198,10 @@ func (m *ClientManager) printDBAllNodes() {
 		err       error
 	}
 
-	resultChan := make(chan nodeDB, 9)
+	resultChan := make(chan nodeDB, totalNodes)
 
-	// Query all 9 nodes in parallel
-	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+	// Query all nodes in parallel
+	for _, nodeID := range allNodeIDs {
 		go func(nid int32) {
 			client, exists := m.nodeClients[nid]
 			if !exists {
@@ -1222,22 +1231,25 @@ func (m *ClientManager) printDBAllNodes() {
 	}
 
 	// Collect and sort results by node ID
-	results := make([]nodeDB, 0, 9)
-	for i := 0; i < 9; i++ {
+	results := make([]nodeDB, 0, totalNodes)
+	for i := 0; i < totalNodes; i++ {
 		results = append(results, <-resultChan)
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].nodeID < results[j].nodeID
 	})
 
-	// Display results grouped by cluster
-	for cluster := 1; cluster <= 3; cluster++ {
-		fmt.Printf("\n--- Cluster %d ---\n", cluster)
-		startNode := int32((cluster-1)*3 + 1)
-		endNode := int32(cluster * 3)
+	// Display results grouped by cluster (supports configurable clusters)
+	for _, clusterID := range m.config.GetAllClusterIDs() {
+		fmt.Printf("\n--- Cluster %d ---\n", clusterID)
+		clusterNodes := m.config.GetNodesInCluster(clusterID)
+		clusterNodeSet := make(map[int32]bool)
+		for _, nid := range clusterNodes {
+			clusterNodeSet[int32(nid)] = true
+		}
 
 		for _, result := range results {
-			if result.nodeID < startNode || result.nodeID > endNode {
+			if !clusterNodeSet[result.nodeID] {
 				continue
 			}
 			if result.err != nil {
@@ -1262,22 +1274,25 @@ func (m *ClientManager) printDBAllNodes() {
 	fmt.Println()
 }
 
-// printViewAllNodes implements PrintView - show NEW-VIEW messages from all nodes
+// printViewAllNodes implements PrintView - show NEW-VIEW messages from all nodes (supports configurable clusters)
 func (m *ClientManager) printViewAllNodes() {
+	totalNodes := m.config.GetTotalNodes()
+	allNodeIDs := m.config.GetAllNodeIDs()
+
 	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
 	fmt.Printf("║  PrintView - NEW-VIEW Messages                        ║\n")
 	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
 
-	// Query all 9 nodes in parallel
+	// Query all nodes in parallel
 	type nodeView struct {
 		nodeID int32
 		reply  *pb.PrintViewReply
 		err    error
 	}
 
-	resultChan := make(chan nodeView, 9)
+	resultChan := make(chan nodeView, totalNodes)
 
-	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+	for _, nodeID := range allNodeIDs {
 		go func(nid int32) {
 			client, exists := m.nodeClients[nid]
 			if !exists {
@@ -1298,22 +1313,25 @@ func (m *ClientManager) printViewAllNodes() {
 	}
 
 	// Collect and sort results by node ID
-	results := make([]nodeView, 0, 9)
-	for i := 0; i < 9; i++ {
+	results := make([]nodeView, 0, totalNodes)
+	for i := 0; i < totalNodes; i++ {
 		results = append(results, <-resultChan)
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].nodeID < results[j].nodeID
 	})
 
-	// Display results grouped by cluster
-	for cluster := 1; cluster <= 3; cluster++ {
-		fmt.Printf("\n--- Cluster %d ---\n", cluster)
-		startNode := int32((cluster-1)*3 + 1)
-		endNode := int32(cluster * 3)
+	// Display results grouped by cluster (supports configurable clusters)
+	for _, clusterID := range m.config.GetAllClusterIDs() {
+		fmt.Printf("\n--- Cluster %d ---\n", clusterID)
+		clusterNodes := m.config.GetNodesInCluster(clusterID)
+		clusterNodeSet := make(map[int32]bool)
+		for _, nid := range clusterNodes {
+			clusterNodeSet[int32(nid)] = true
+		}
 
 		for _, result := range results {
-			if result.nodeID < startNode || result.nodeID > endNode {
+			if !clusterNodeSet[result.nodeID] {
 				continue
 			}
 			if result.err != nil {
@@ -1431,13 +1449,16 @@ func (m *ClientManager) printReshard() {
 
 	// Show items analyzed per cluster (only items involved in transactions)
 	fmt.Printf("\nItems analyzed from this test set (by current cluster):\n")
-	for part := int32(1); part <= numClusters; part++ {
-		size := graph.PartitionSizes[part]
+	for _, clusterID := range m.config.GetAllClusterIDs() {
+		size := graph.PartitionSizes[int32(clusterID)]
 		if size > 0 {
-			fmt.Printf("  Cluster %d: %d items involved in transactions\n", part, size)
+			fmt.Printf("  Cluster %d: %d items involved in transactions\n", clusterID, size)
 		}
 	}
-	fmt.Printf("  (Note: Full clusters have 3000 items each; only accessed items are analyzed)\n")
+	// Calculate items per cluster dynamically
+	totalItems := m.config.GetTotalDataItems()
+	itemsPerCluster := totalItems / int(numClusters)
+	fmt.Printf("  (Note: Full clusters have ~%d items each; only accessed items are analyzed)\n", itemsPerCluster)
 
 	fmt.Printf("═══════════════════════════════════════════════════════════════════\n\n")
 }
@@ -1679,8 +1700,11 @@ func (m *ClientManager) executeReshard() {
 	}
 }
 
-// flushAllNodes implements Flush - reset all node state
+// flushAllNodes implements Flush - reset all node state (supports configurable clusters)
 func (m *ClientManager) flushAllNodes() {
+	totalNodes := m.config.GetTotalNodes()
+	allNodeIDs := m.config.GetAllNodeIDs()
+
 	fmt.Print("Flushing all nodes...")
 
 	type flushResult struct {
@@ -1688,10 +1712,10 @@ func (m *ClientManager) flushAllNodes() {
 		err    error
 	}
 
-	resultChan := make(chan flushResult, 9)
+	resultChan := make(chan flushResult, totalNodes)
 
-	// Flush all 9 nodes in parallel
-	for nodeID := int32(1); nodeID <= 9; nodeID++ {
+	// Flush all nodes in parallel
+	for _, nodeID := range allNodeIDs {
 		go func(nid int32) {
 			client, exists := m.nodeClients[nid]
 			if !exists {
@@ -1720,13 +1744,13 @@ func (m *ClientManager) flushAllNodes() {
 
 	// Collect results
 	successCount := 0
-	for i := 0; i < 9; i++ {
+	for i := 0; i < totalNodes; i++ {
 		result := <-resultChan
 		if result.err == nil {
 			successCount++
 		}
 	}
-	fmt.Printf(" %d/9 reset\n", successCount)
+	fmt.Printf(" %d/%d reset\n", successCount, totalNodes)
 
 	// Reset client-side tracking
 	m.mu.Lock()

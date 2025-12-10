@@ -13,6 +13,10 @@ type BenchmarkConfig struct {
 	Duration          int // Duration in seconds (0 = use TotalTransactions)
 	NumClients        int // Number of concurrent clients
 
+	// Cluster configuration (supports configurable clusters)
+	NumClusters int   // Number of clusters (default: 3)
+	TotalItems  int32 // Total data items (default: 9000)
+
 	// Transaction mix
 	CrossShardPercent int // Percentage of cross-shard transactions (0-100)
 	ReadOnlyPercent   int // Percentage of read-only queries (0-100)
@@ -44,6 +48,8 @@ func DefaultConfig() *BenchmarkConfig {
 		TargetTPS:         1000,
 		Duration:          0,
 		NumClients:        10,
+		NumClusters:       3,    // Default 3 clusters (configurable)
+		TotalItems:        9000, // Default 9000 items (configurable)
 		CrossShardPercent: 20,
 		ReadOnlyPercent:   10,
 		DataDistribution:  "uniform",
@@ -185,4 +191,3 @@ func (c *BenchmarkConfig) GetEstimatedDuration() time.Duration {
 	seconds := c.TotalTransactions / c.TargetTPS
 	return time.Duration(seconds+c.WarmupSeconds) * time.Second
 }
-

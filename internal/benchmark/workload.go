@@ -6,14 +6,23 @@ import (
 	"time"
 )
 
+// ClusterRange defines the data item range for a cluster
+type ClusterRange struct {
+	ID    int
+	Start int32
+	End   int32
+}
+
 // WorkloadGenerator generates transactions according to configuration
 type WorkloadGenerator struct {
-	config       *BenchmarkConfig
-	rng          *rand.Rand
-	zipfGen      *ZipfGenerator
-	totalItems   int32 // Total data items across all shards
-	hotspotStart int32 // Start of hotspot range
-	hotspotEnd   int32 // End of hotspot range
+	config        *BenchmarkConfig
+	rng           *rand.Rand
+	zipfGen       *ZipfGenerator
+	totalItems    int32          // Total data items across all shards
+	hotspotStart  int32          // Start of hotspot range
+	hotspotEnd    int32          // End of hotspot range
+	numClusters   int            // Number of clusters (configurable)
+	clusterRanges []ClusterRange // Range for each cluster (configurable)
 }
 
 // NewWorkloadGenerator creates a new workload generator
@@ -25,6 +34,9 @@ func NewWorkloadGenerator(config *BenchmarkConfig, totalItems int32) *WorkloadGe
 		rng:        rng,
 		totalItems: totalItems,
 	}
+
+	// Initialize cluster ranges (supports configurable clusters)
+	wg.initClusterRanges()
 
 	// Initialize distribution-specific generators
 	switch config.DataDistribution {
@@ -39,7 +51,35 @@ func NewWorkloadGenerator(config *BenchmarkConfig, totalItems int32) *WorkloadGe
 	return wg
 }
 
-// GenerateTransaction generates a single transaction
+// initClusterRanges initializes cluster ranges based on configuration
+func (wg *WorkloadGenerator) initClusterRanges() {
+	// Default: 3 clusters with equal distribution
+	numClusters := wg.config.NumClusters
+	if numClusters <= 0 {
+		numClusters = 3
+	}
+	wg.numClusters = numClusters
+
+	itemsPerCluster := wg.totalItems / int32(numClusters)
+	wg.clusterRanges = make([]ClusterRange, numClusters)
+
+	start := int32(1)
+	for i := 0; i < numClusters; i++ {
+		end := start + itemsPerCluster - 1
+		if i == numClusters-1 {
+			// Last cluster gets remaining items
+			end = wg.totalItems
+		}
+		wg.clusterRanges[i] = ClusterRange{
+			ID:    i + 1,
+			Start: start,
+			End:   end,
+		}
+		start = end + 1
+	}
+}
+
+// GenerateTransaction generates a single transaction (supports configurable clusters)
 func (wg *WorkloadGenerator) GenerateTransaction() *Transaction {
 	txn := &Transaction{}
 
@@ -53,15 +93,21 @@ func (wg *WorkloadGenerator) GenerateTransaction() *Transaction {
 		txn.Receiver = 0
 		txn.Amount = 0
 	} else if roll < wg.config.ReadOnlyPercent+wg.config.CrossShardPercent {
-		// Cross-shard transaction
+		// Cross-shard transaction (supports configurable clusters)
 		txn.Type = TxnTypeCrossShard
-		txn.Sender = wg.selectDataItemFromCluster(1)   // Cluster 1
-		txn.Receiver = wg.selectDataItemFromCluster(2) // Cluster 2
+		// Select two different random clusters
+		cluster1 := wg.rng.Intn(wg.numClusters) + 1
+		cluster2 := wg.rng.Intn(wg.numClusters) + 1
+		for cluster2 == cluster1 && wg.numClusters > 1 {
+			cluster2 = wg.rng.Intn(wg.numClusters) + 1
+		}
+		txn.Sender = wg.selectDataItemFromCluster(cluster1)
+		txn.Receiver = wg.selectDataItemFromCluster(cluster2)
 		txn.Amount = wg.selectAmount()
 	} else {
-		// Intra-shard transaction
+		// Intra-shard transaction (supports configurable clusters)
 		txn.Type = TxnTypeIntraShard
-		cluster := wg.rng.Intn(3) + 1
+		cluster := wg.rng.Intn(wg.numClusters) + 1
 		txn.Sender = wg.selectDataItemFromCluster(cluster)
 		txn.Receiver = wg.selectDataItemFromCluster(cluster)
 		// Make sure sender != receiver
@@ -92,38 +138,37 @@ func (wg *WorkloadGenerator) selectDataItem() int32 {
 	}
 }
 
-// selectDataItemFromCluster selects a data item from a specific cluster
+// selectDataItemFromCluster selects a data item from a specific cluster (supports configurable clusters)
 func (wg *WorkloadGenerator) selectDataItemFromCluster(cluster int) int32 {
-	// Cluster 1: 1-3000, Cluster 2: 3001-6000, Cluster 3: 6001-9000
-	ranges := map[int][2]int32{
-		1: {1, 3000},
-		2: {3001, 6000},
-		3: {6001, 9000},
+	// Get range from configurable cluster ranges
+	if cluster < 1 || cluster > len(wg.clusterRanges) {
+		// Fallback to cluster 1
+		cluster = 1
 	}
 
-	r := ranges[cluster]
-	rangeSize := r[1] - r[0] + 1
+	r := wg.clusterRanges[cluster-1]
+	rangeSize := r.End - r.Start + 1
 
 	switch wg.config.DataDistribution {
 	case "zipf":
 		// Map zipf to cluster range
 		zipfVal := wg.zipfGen.Next()
 		scaledVal := (zipfVal % uint64(rangeSize))
-		return r[0] + int32(scaledVal)
+		return r.Start + int32(scaledVal)
 	case "hotspot":
 		// Check if hotspot is in this cluster
-		if wg.hotspotStart >= r[0] && wg.hotspotStart <= r[1] {
+		if wg.hotspotStart >= r.Start && wg.hotspotStart <= r.End {
 			roll := wg.rng.Intn(100)
 			if roll < wg.config.HotspotAccess {
 				// Hotspot access (limited to cluster range)
-				hotspotInCluster := min(wg.hotspotEnd, r[1]) - wg.hotspotStart + 1
+				hotspotInCluster := min(wg.hotspotEnd, r.End) - wg.hotspotStart + 1
 				return wg.hotspotStart + wg.rng.Int31n(hotspotInCluster)
 			}
 		}
 		// Uniform within cluster
-		return r[0] + wg.rng.Int31n(rangeSize)
+		return r.Start + wg.rng.Int31n(rangeSize)
 	default: // uniform
-		return r[0] + wg.rng.Int31n(rangeSize)
+		return r.Start + wg.rng.Int31n(rangeSize)
 	}
 }
 
@@ -238,4 +283,3 @@ func (zg *ZipfGenerator) zeta(n uint64) float64 {
 	}
 	return sum
 }
-
