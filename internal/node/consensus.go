@@ -94,7 +94,6 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 	if !isLeader {
 		// leaderID > 0 means we know a leader (leaderID = -1 means uninitialized, 0 means no leader)
 		if leaderID > 0 && leaderID != n.id {
-			// No need for lock here - peerClients is read-only after initialization
 			client, ok := n.peerClients[leaderID]
 			if ok {
 				// forward to leader RPC and return its reply
@@ -239,12 +238,7 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 		}
 	}
 
-	// 🚀 PIPELINING: Process with normal Paxos
-	// executeTransaction will handle the cross-shard logic (debit or credit based on ownership)
-	log.Printf("Node %d: 🚀 Processing transaction %d→%d via PIPELINED Paxos (cluster %d)",
-		n.id, tx.Sender, tx.Receiver, n.clusterID)
-
-	// PIPELINING: Start consensus asynchronously, return result via channel
+	// Process with pipelined Paxos
 	return n.processAsLeaderAsync(req)
 }
 
@@ -355,10 +349,7 @@ func (n *Node) processAsLeaderAsync(req *pb.TransactionRequest) (*pb.Transaction
 	n.log[seq] = entry
 	n.logMu.Unlock()
 
-	log.Printf("Node %d: 🚀 PARALLEL: Allocated seq=%d for client %s (parallel consensus)", n.id, seq, req.ClientId)
-
-	// 🚀 RUN CONSENSUS DIRECTLY - Let fine-grained locking handle parallelism
-	// No artificial semaphore limit - the system naturally throttles via execution serialization
+	// Run consensus
 	reply, _ := n.runPipelinedConsensus(seq, ballot, req, entry)
 	return reply, nil
 }
@@ -404,16 +395,6 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 	quorum := (len(peers) + 1 + 1) / 2
 
 	if acceptedCount < quorum {
-		log.Printf("Node %d: ❌ No quorum for seq %d (accepted=%d, need=%d) - removing from log", n.id, seq, acceptedCount, quorum)
-
-		// CRITICAL: Remove entry from log immediately
-		// Rationale:
-		// - Client expects accurate feedback
-		// - If we keep entry, NEW-VIEW might commit it later
-		// - Client already received FAILED, but transaction would succeed
-		// - This creates inconsistency between client state and cluster state
-		// - Better to fail cleanly and let client retry if needed
-
 		n.logMu.Lock()
 		delete(n.log, seq)
 		n.logMu.Unlock()
@@ -424,8 +405,6 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 			Result:  pb.ResultType_FAILED,
 		}, nil
 	}
-
-	log.Printf("Node %d: ✅ Quorum for seq=%d (accepted=%d)", n.id, seq, acceptedCount)
 
 	// Send Commit to peers (async, fire-and-forget)
 	commitReq := &pb.CommitRequest{
@@ -575,23 +554,18 @@ func (n *Node) processAsLeader(req *pb.TransactionRequest) (*pb.TransactionReply
 					entry2.AcceptedBy[r.nodeID] = true
 				}
 				n.logMu.Unlock()
-				log.Printf("Node %d: ACCEPTED from node %d", n.id, r.nodeID)
-			} else {
-				log.Printf("Node %d: ACCEPT rejected by node %d (err=%v)", n.id, r.nodeID, r.err)
 			}
 			if n.hasQuorum(acceptedCount) {
 				// we have quorum early; drain others optionally
 				goto QUORUM
 			}
 		case <-timeout:
-			log.Printf("Node %d: Timeout waiting accepts (got %d)", n.id, acceptedCount)
 			goto QUORUM
 		}
 	}
 QUORUM:
 
 	if !n.hasQuorum(acceptedCount) {
-		log.Printf("Node %d: No quorum for seq %d (%d/%d) - keeping in log for later NEW-VIEW", n.id, seq, acceptedCount, n.quorumSize())
 		// DON'T cleanup log[seq] - keep it for NEW-VIEW recovery
 		// When more nodes come back, this will be included in NEW-VIEW and can achieve quorum then
 		return nil, fmt.Errorf("no quorum for seq %d (have %d, need %d)", seq, acceptedCount, n.quorumSize())
@@ -672,15 +646,8 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 		n.resetLeaderTimer()
 	}
 
-	// Store in log (use logMu)
+	// Store in log
 	if req.SequenceNumber > 0 {
-		phaseStr := ""
-		if req.Phase != "" {
-			phaseStr = fmt.Sprintf(", phase='%s'", req.Phase)
-		}
-		log.Printf("Node %d: Received ACCEPT seq=%d, ballot=%s%s", n.id, req.SequenceNumber, reqBallot.String(), phaseStr)
-
-		// Create log entry with phase marker
 		var ent *types.LogEntry
 		if req.Phase != "" {
 			ent = types.NewLogEntryWithPhase(reqBallot, req.SequenceNumber, req.Request, req.IsNoop, req.Phase)
@@ -691,9 +658,7 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 
 		n.logMu.Lock()
 		if existing, ok := n.log[req.SequenceNumber]; ok {
-			// merge: choose entry with higher ballot if necessary
-			existingBallot := existing.Ballot
-			if reqBallot.GreaterThan(existingBallot) {
+			if reqBallot.GreaterThan(existing.Ballot) {
 				n.log[req.SequenceNumber] = ent
 			}
 		} else {
@@ -701,13 +666,10 @@ func (n *Node) Accept(ctx context.Context, req *pb.AcceptRequest) (*pb.AcceptedR
 		}
 		n.logMu.Unlock()
 
-		// NEW: If this is a 2PC transaction (has phase marker), handle it
+		// Handle 2PC phase if present
 		if req.Phase != "" {
-			log.Printf("Node %d: 2PC phase '%s' detected for seq=%d, calling handle2PCPhase", n.id, req.Phase, req.SequenceNumber)
 			n.handle2PCPhase(ent, req.Phase)
 		}
-
-		log.Printf("Node %d: ✓ ACCEPTED seq=%d", n.id, req.SequenceNumber)
 	}
 
 	return &pb.AcceptedReply{Success: true, Ballot: req.Ballot, SequenceNumber: req.SequenceNumber, NodeId: n.id}, nil
@@ -721,12 +683,7 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 	isLeader := n.isLeader
 	n.paxosMu.RUnlock()
 
-	n.logMu.RLock()
-	lastExec := n.lastExecuted
-	n.logMu.RUnlock()
-
 	if !active {
-		log.Printf("Node %d: ⚠️  COMMIT REJECTED - node is inactive", n.id)
 		return &pb.CommitReply{Success: false}, nil
 	}
 
@@ -737,14 +694,9 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 		n.resetLeaderTimer()
 	}
 
-	// Log and apply commit (skip seq=0 heartbeats)
+	// Apply commit (skip seq=0 heartbeats)
 	if req.SequenceNumber > 0 {
-		if !req.IsNoop {
-			log.Printf("Node %d: 📬 RECEIVED COMMIT seq=%d (isLeader=%v, lastExecuted=%d)",
-				n.id, req.SequenceNumber, isLeader, lastExec)
-		}
-		result := n.commitAndExecute(req.SequenceNumber)
-		log.Printf("Node %d: 🔄 COMMIT seq=%d executed with result=%v", n.id, req.SequenceNumber, result)
+		n.commitAndExecute(req.SequenceNumber)
 	}
 
 	// Check if leader should create checkpoint
@@ -755,155 +707,138 @@ func (n *Node) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.CommitRep
 
 // commitAndExecute commits a seq and executes up to that seq in order
 // 🔒 FINE-GRAINED: Use logMu for log access
+// backgroundExecutionThread runs as a single goroutine per node
+// It executes committed transactions SEQUENTIALLY, guaranteeing linearizability
+func (n *Node) backgroundExecutionThread() {
+	log.Printf("Node %d: Background execution thread started (sequential execution)", n.id)
+
+	for {
+		select {
+		case <-n.stopChan:
+			log.Printf("Node %d: Background execution thread stopping", n.id)
+			return
+		case <-n.execNotify:
+			// New sequence(s) committed, try to execute
+		case <-time.After(500 * time.Microsecond):
+			// Periodic check for any pending executions
+		}
+
+		// Execute all pending committed sequences in order
+		for {
+			n.logMu.RLock()
+			nextSeq := n.lastExecuted + 1
+			entry, exists := n.log[nextSeq]
+			n.logMu.RUnlock()
+
+			if !exists {
+				break // No more entries
+			}
+
+			n.logMu.RLock()
+			status := entry.Status
+			n.logMu.RUnlock()
+
+			if status != "C" {
+				break // Not committed yet
+			}
+
+			// Execute this transaction (single-threaded, sequential)
+			result := n.executeTransactionSequential(nextSeq, entry)
+
+			// Update result and advance lastExecuted atomically
+			n.logMu.Lock()
+			if e, ok := n.log[nextSeq]; ok {
+				e.Result = result
+				e.Status = "E"
+			}
+			n.lastExecuted = nextSeq
+			n.logMu.Unlock()
+		}
+	}
+}
+
+// commitAndExecute marks seq as committed and waits for background thread to execute it
 func (n *Node) commitAndExecute(seq int32) pb.ResultType {
-	// Ensure entry exists and mark as committed (use logMu)
 	n.logMu.Lock()
 	entry, ok := n.log[seq]
 	lastExec := n.lastExecuted
 
-	log.Printf("Node %d: 🔍 commitAndExecute seq=%d: entry_exists=%v, lastExecuted=%d", n.id, seq, ok, lastExec)
-
-	// ✅ CRITICAL FIX: If already executed, return immediately to prevent execution storm
+	// Already executed - return the stored result
 	if seq <= lastExec {
+		if entry != nil {
+			result := entry.Result
+			n.logMu.Unlock()
+			return result
+		}
 		n.logMu.Unlock()
-		log.Printf("Node %d: ✓ Seq %d already executed (lastExecuted=%d), skipping commitAndExecute", n.id, seq, lastExec)
 		return pb.ResultType_SUCCESS
 	}
 
 	if !ok {
-		// We received a COMMIT for a sequence we don't have in our log
 		n.logMu.Unlock()
-
-		if seq > lastExec+1 {
-			log.Printf("Node %d: ❌ Missing log entry for seq %d (lastExecuted=%d) - will be filled by NEW-VIEW", n.id, seq, lastExec)
-		} else {
-			log.Printf("Node %d: ❌ Missing log entry for seq %d but it's next in line (lastExecuted=%d)", n.id, seq, lastExec)
-		}
 		return pb.ResultType_FAILED
 	}
 
-	// Mark committed
-	oldStatus := entry.Status
+	// Mark as committed
 	entry.Status = "C"
-	log.Printf("Node %d: ✅ Marked seq=%d as COMMITTED (was %s)", n.id, seq, oldStatus)
 	n.logMu.Unlock()
 
-	// Sequential execution: Execute all committed entries from lastExecuted+1 up to seq
-	// This ensures linearizability by maintaining sequential order
+	// Signal background thread
+	select {
+	case n.execNotify <- struct{}{}:
+	default:
+	}
 
-	// WAIT for gaps to be filled (for pipelined 2PC)
-	// Retry until we can execute this sequence
-	maxRetries := 100
-	for retry := 0; retry < maxRetries; retry++ {
+	// Wait for background thread to execute this sequence
+	maxWaitMs := 2000
+	startTime := time.Now()
+
+	for {
 		n.logMu.RLock()
 		currentLastExec := n.lastExecuted
 		n.logMu.RUnlock()
 
-		// Check if there's a gap between lastExecuted and seq
-		hasGap := false
-		for checkSeq := currentLastExec + 1; checkSeq < seq; checkSeq++ {
+		if currentLastExec >= seq {
+			// Executed! Get the result
 			n.logMu.RLock()
-			_, exists := n.log[checkSeq]
-			n.logMu.RUnlock()
-			if !exists {
-				hasGap = true
-				break
+			if e, ok := n.log[seq]; ok {
+				result := e.Result
+				n.logMu.RUnlock()
+				return result
 			}
+			n.logMu.RUnlock()
+			return pb.ResultType_SUCCESS
 		}
 
-		if !hasGap || seq == currentLastExec+1 {
-			// No gap, proceed with execution
-			break
+		if time.Since(startTime) > time.Duration(maxWaitMs)*time.Millisecond {
+			return pb.ResultType_FAILED
 		}
 
-		// Gap exists, wait a bit for prior sequences to commit
-		if retry < maxRetries-1 {
-			log.Printf("Node %d: ⏳ Waiting for seq %d (lastExec=%d, retry %d/%d)", n.id, seq, currentLastExec, retry+1, maxRetries)
-			time.Sleep(10 * time.Millisecond)
-		}
+		time.Sleep(100 * time.Microsecond)
 	}
-
-	n.logMu.RLock()
-	lastExec = n.lastExecuted
-	n.logMu.RUnlock()
-
-	log.Printf("Node %d: ▶️  Executing committed entries from %d to %d", n.id, lastExec+1, seq)
-
-	finalResult := pb.ResultType_FAILED // ← CRITICAL FIX: Default to FAILED, not SUCCESS!
-	for nextSeq := lastExec + 1; nextSeq <= seq; nextSeq++ {
-		n.logMu.RLock()
-		nextEntry, exists := n.log[nextSeq]
-		n.logMu.RUnlock()
-
-		if !exists {
-			log.Printf("Node %d: ⚠️  Gap in log at seq %d (skipping for now)", n.id, nextSeq)
-			break // Don't skip gaps - wait for recovery
-		}
-
-		n.logMu.RLock()
-		nextStatus := nextEntry.Status
-		n.logMu.RUnlock()
-
-		if nextStatus != "C" && nextStatus != "E" {
-			log.Printf("Node %d: ⚠️  Seq %d not committed yet (status=%s), stopping execution", n.id, nextSeq, nextStatus)
-			break // Don't execute uncommitted entries
-		}
-
-		result := n.executeTransaction(nextSeq, nextEntry)
-		if nextSeq == seq {
-			finalResult = result // Return result of target sequence
-		}
-	}
-
-	return finalResult
 }
 
-func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultType {
-	// 🔒 SEQUENTIAL EXECUTION: Use execMu to ensure linearizability
-	// Only one transaction executes at a time
-	n.execMu.Lock()
-	defer n.execMu.Unlock()
-
+// executeTransactionSequential executes a single transaction
+// ONLY called by backgroundExecutionThread - guaranteed sequential execution
+func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb.ResultType {
+	// Already executed check (shouldn't happen but safety)
 	n.logMu.RLock()
-	status := entry.Status
-	n.logMu.RUnlock()
-
-	if status == "E" {
-		log.Printf("Node %d: executeTransaction seq=%d already executed, skipping", n.id, seq)
+	if entry.Status == "E" {
+		n.logMu.RUnlock()
 		return pb.ResultType_SUCCESS
 	}
-
-	log.Printf("Node %d: 🎬 executeTransaction START seq=%d (sequential)", n.id, seq)
-
-	// Sequential execution: Verify this is the next expected sequence
-	n.logMu.RLock()
-	lastExec := n.lastExecuted
 	n.logMu.RUnlock()
 
-	if seq != lastExec+1 {
-		log.Printf("Node %d: ⚠️  Seq %d out of order (lastExecuted=%d), skipping", n.id, seq, lastExec)
-		return pb.ResultType_FAILED
-	}
-
 	if entry.IsNoOp {
-		log.Printf("Node %d: Executing NO-OP seq %d", n.id, seq)
-		n.logMu.Lock()
-		entry.Status = "E"
-		if seq > n.lastExecuted {
-			n.lastExecuted = seq
-		}
-		n.logMu.Unlock()
 		return pb.ResultType_SUCCESS
 	}
 
 	tx := entry.Request.Transaction
-	sender := tx.Sender // Now int32 data item ID
-	recv := tx.Receiver // Now int32 data item ID
+	sender := tx.Sender
+	recv := tx.Receiver
 	amt := tx.Amount
 	clientID := entry.Request.ClientId
 	timestamp := entry.Request.Timestamp
-
-	log.Printf("Node %d: 🔍 executeTransaction seq=%d: %d→%d:%d", n.id, seq, sender, recv, amt)
 
 	// Determine which cluster owns which items
 	senderCluster := n.config.GetClusterForDataItem(sender)
@@ -915,24 +850,12 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 	ownsReceiver := int32(receiverCluster) == n.clusterID
 
 	if isCrossShard {
-		// This is a cross-shard transaction - only process our part
-		log.Printf("Node %d: 🔍 Cross-shard detected seq=%d: sender=%d(C%d), recv=%d(C%d), ourCluster=%d, ownsSender=%v, ownsRecv=%v",
-			n.id, seq, sender, senderCluster, recv, receiverCluster, n.clusterID, ownsSender, ownsReceiver)
-
+		// Cross-shard transaction - only process our part
 		if !ownsSender && !ownsReceiver {
-			// We don't own either item - skip execution
-			log.Printf("Node %d: Skipping cross-shard transaction seq %d (neither item in our cluster %d)",
-				n.id, seq, n.clusterID)
-			n.logMu.Lock()
-			entry.Status = "E"
-			if seq > n.lastExecuted {
-				n.lastExecuted = seq
-			}
-			n.logMu.Unlock()
-			return pb.ResultType_SUCCESS
+			return pb.ResultType_SUCCESS // Nothing to do for this node
 		}
 
-		// Determine which items to lock and process
+		// Determine which items to lock
 		var itemsToProcess []int32
 		if ownsSender {
 			itemsToProcess = []int32{sender}
@@ -940,188 +863,84 @@ func (n *Node) executeTransaction(seq int32, entry *types.LogEntry) pb.ResultTyp
 			itemsToProcess = []int32{recv}
 		}
 
-		// Acquire locks (acquireLocks has its own lockMu, no conflict)
 		acquired, lockedItems := n.acquireLocks(itemsToProcess, clientID, timestamp)
-
 		if !acquired {
-			log.Printf("Node %d: ⚠️  Failed to acquire locks for seq %d (items %v), marking as FAILED",
-				n.id, seq, itemsToProcess)
-			n.logMu.Lock()
-			entry.Status = "E"
-			if seq > n.lastExecuted {
-				n.lastExecuted = seq
-			}
-			n.logMu.Unlock()
 			return pb.ResultType_FAILED
 		}
-
-		// Ensure locks are released after execution
 		defer n.releaseLocks(lockedItems, clientID, timestamp)
 
-		// ATOMIC: Check balance and apply changes while holding balanceMu
-		// This prevents TOCTOU race condition between check and deduct
 		var changedItemID int32
 		var result pb.ResultType
 		n.balanceMu.Lock()
 
 		if ownsSender {
-			// Check and debit from sender ATOMICALLY
 			senderBalance := n.balances[sender]
 			if senderBalance < amt {
 				n.balanceMu.Unlock()
-				log.Printf("Node %d: INSUFFICIENT BALANCE for item %d (has %d needs %d)",
-					n.id, sender, senderBalance, amt)
-				n.logMu.Lock()
-				entry.Status = "E"
-				entry.Result = pb.ResultType_INSUFFICIENT_BALANCE
-				if seq > n.lastExecuted {
-					n.lastExecuted = seq
-				}
-				n.logMu.Unlock()
 				return pb.ResultType_INSUFFICIENT_BALANCE
 			}
-			// Balance sufficient - deduct immediately (still holding lock)
-			senderOldBalance := n.balances[sender]
 			n.balances[sender] -= amt
 			changedItemID = sender
 			result = pb.ResultType_SUCCESS
-			log.Printf("Node %d: ✅ EXECUTED seq=%d (2PC-DEBIT): item %d: %d→%d (owns sender, cluster %d)",
-				n.id, seq, sender, senderOldBalance, n.balances[sender], n.clusterID)
 		} else if ownsReceiver {
-			// Credit to receiver
-			recvOldBalance := n.balances[recv]
 			n.balances[recv] += amt
 			changedItemID = recv
 			result = pb.ResultType_SUCCESS
-			log.Printf("Node %d: ✅ EXECUTED seq=%d (2PC-CREDIT): item %d: %d→%d (owns receiver, cluster %d)",
-				n.id, seq, recv, recvOldBalance, n.balances[recv], n.clusterID)
 		} else {
 			n.balanceMu.Unlock()
-			log.Printf("Node %d: ⚠️  UNEXPECTED: Cross-shard but don't own sender or receiver!", n.id)
-			n.logMu.Lock()
-			entry.Status = "E"
-			entry.Result = pb.ResultType_FAILED
-			if seq > n.lastExecuted {
-				n.lastExecuted = seq
-			}
-			n.logMu.Unlock()
 			return pb.ResultType_FAILED
 		}
 		newBalance := n.balances[changedItemID]
 		n.balanceMu.Unlock()
 
-		// Update log and lastExecuted atomically (use logMu)
-		n.logMu.Lock()
-		entry.Status = "E"
-		entry.Result = result
-		// Update lastExecuted to highest contiguous sequence
-		if seq > n.lastExecuted {
-			n.lastExecuted = seq
-		}
-		n.logMu.Unlock()
+		// Save balance async
+		go n.saveBalance(changedItemID, newBalance)
 
-		// Save only the changed balance (ASYNC for performance)
-		go func(itemID, balance int32) {
-			if err := n.saveBalance(itemID, balance); err != nil {
-				log.Printf("Node %d: ⚠️  Warning - failed to save balance: %v", n.id, err)
-			}
-		}(changedItemID, newBalance)
-
-		// Record access pattern (no locks needed)
+		// Record access pattern
 		n.RecordTransactionAccess(sender, recv, isCrossShard)
 
-		log.Printf("Node %d: ✅ executeTransaction COMPLETE seq=%d (parallel)", n.id, seq)
-		return pb.ResultType_SUCCESS
+		return result
 	}
 
-	// Regular intra-shard transaction - process both items as before
-	// Acquire locks on both sender and receiver (acquireLocks has its own lockMu)
+	// Regular intra-shard transaction - process both items
 	items := []int32{sender, recv}
 	acquired, lockedItems := n.acquireLocks(items, clientID, timestamp)
 
 	if !acquired {
-		log.Printf("Node %d: ⚠️  Failed to acquire locks for seq %d (items %v), marking as FAILED",
-			n.id, seq, items)
-		n.logMu.Lock()
-		entry.Status = "E" // Mark as executed but failed
-		if seq > n.lastExecuted {
-			n.lastExecuted = seq
-		}
-		n.logMu.Unlock()
 		return pb.ResultType_FAILED
 	}
-
-	// Ensure locks are released after execution
 	defer n.releaseLocks(lockedItems, clientID, timestamp)
 
-	// ATOMIC: Check balance and apply changes while holding balanceMu
-	// This prevents TOCTOU race condition between check and deduct
+	// ATOMIC: Check balance and apply changes
 	n.balanceMu.Lock()
 	senderBalance := n.balances[sender]
 
 	if senderBalance < amt {
 		n.balanceMu.Unlock()
-		log.Printf("Node %d: INSUFFICIENT BALANCE for item %d (has %d needs %d)", n.id, sender, senderBalance, amt)
-		n.logMu.Lock()
-		entry.Status = "E"
-		entry.Result = pb.ResultType_INSUFFICIENT_BALANCE
-		if seq > n.lastExecuted {
-			n.lastExecuted = seq
-		}
-		n.logMu.Unlock()
 		return pb.ResultType_INSUFFICIENT_BALANCE
 	}
 
-	// Balance sufficient - record old values and apply changes atomically
-	senderOldBalance := n.balances[sender]
-	recvOldBalance := n.balances[recv]
-
-	// Apply balance changes (still holding lock)
+	// Apply balance changes
 	n.balances[sender] -= amt
 	n.balances[recv] += amt
 	newSenderBalance := n.balances[sender]
 	newRecvBalance := n.balances[recv]
 	n.balanceMu.Unlock()
 
-	// Phase 5: Create WAL entry after applying changes (for rollback if needed)
+	// WAL for rollback support
 	txnID := fmt.Sprintf("txn-%s-%d", clientID, timestamp)
 	n.createWALEntry(txnID, seq)
+	n.writeToWAL(txnID, types.OpTypeDebit, sender, senderBalance, newSenderBalance)
+	n.writeToWAL(txnID, types.OpTypeCredit, recv, n.balances[recv]-amt, newRecvBalance)
 
-	// Write operations to WAL (has its own walMu)
-	n.writeToWAL(txnID, types.OpTypeDebit, sender, senderOldBalance, newSenderBalance)
-	n.writeToWAL(txnID, types.OpTypeCredit, recv, recvOldBalance, newRecvBalance)
+	// Record access pattern
+	n.RecordTransactionAccess(sender, recv, senderCluster != receiverCluster)
 
-	// Update log (use logMu)
-	n.logMu.Lock()
-	entry.Status = "E"
-	entry.Result = pb.ResultType_SUCCESS
-	if seq > n.lastExecuted {
-		n.lastExecuted = seq
-	}
-	n.logMu.Unlock()
-
-	log.Printf("Node %d: ✅ EXECUTED seq=%d: %d->%d:%d (new: %d=%d, %d=%d) [locked+WAL+parallel]",
-		n.id, seq, sender, recv, amt, sender, newSenderBalance, recv, newRecvBalance)
-
-	// Phase 9: Record transaction access pattern for redistribution analysis
-	senderClusterForAccess := n.config.GetClusterForDataItem(sender)
-	recvClusterForAccess := n.config.GetClusterForDataItem(recv)
-	isCrossClusterForAccess := senderClusterForAccess != recvClusterForAccess
-	n.RecordTransactionAccess(sender, recv, isCrossClusterForAccess)
-
-	// Commit WAL entry (transaction successful) - has its own walMu
-	if err := n.commitWAL(txnID); err != nil {
-		log.Printf("Node %d: ⚠️  Warning - failed to commit WAL: %v", n.id, err)
-	}
-
-	// Save only changed balances (ASYNC for performance)
+	// Commit WAL and save balances async
+	n.commitWAL(txnID)
 	go func() {
-		if err := n.saveBalance(sender, newSenderBalance); err != nil {
-			log.Printf("Node %d: ⚠️  Warning - failed to save sender balance: %v", n.id, err)
-		}
-		if err := n.saveBalance(recv, newRecvBalance); err != nil {
-			log.Printf("Node %d: ⚠️  Warning - failed to save receiver balance: %v", n.id, err)
-		}
+		n.saveBalance(sender, newSenderBalance)
+		n.saveBalance(recv, newRecvBalance)
 	}()
 
 	return pb.ResultType_SUCCESS

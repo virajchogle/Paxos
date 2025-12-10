@@ -54,6 +54,9 @@ type Node struct {
 	nextSeqNum   int32
 	lastExecuted int32
 
+	// Background execution thread
+	execNotify chan struct{} // Signal when new sequences are committed
+
 	// Logs (protected by logMu)
 	log        map[int32]*types.LogEntry // Single log with status tracking (A/C/E)
 	newViewLog []*pb.NewViewRequest
@@ -193,7 +196,8 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		twoPCState: TwoPCState{
 			transactions: make(map[string]*TwoPCTransaction),
 		},
-		twoPCWAL: make(map[string]map[int32]int32), // WAL for all nodes
+		twoPCWAL:   make(map[string]map[int32]int32), // WAL for all nodes
+		execNotify: make(chan struct{}, 1000),        // Buffered channel for execution signals
 	}
 
 	// Open PebbleDB for persistent storage
@@ -273,6 +277,9 @@ func (n *Node) Start() error {
 
 	// Start periodic gap detection
 	go n.startGapDetection()
+
+	// Start background execution thread (sequential execution for linearizability)
+	go n.backgroundExecutionThread()
 
 	// Start the persistent leader timer goroutine
 	n.startLeaderTimer()
@@ -942,9 +949,6 @@ func (n *Node) acquireLock(dataItemID int32, clientID string, timestamp int64) b
 
 		// Check if lock has timed out
 		if time.Since(lock.lockedAt) > n.lockTimeout {
-			log.Printf("Node %d: Lock on item %d expired (held by %s), granting to %s",
-				n.id, dataItemID, lock.clientID, clientID)
-			// Lock expired, can grant to new client
 			n.locks[dataItemID] = &DataItemLock{
 				clientID:  clientID,
 				timestamp: timestamp,
@@ -953,9 +957,6 @@ func (n *Node) acquireLock(dataItemID int32, clientID string, timestamp int64) b
 			return true
 		}
 
-		// Lock is held by someone else and hasn't timed out
-		log.Printf("Node %d: Lock on item %d DENIED - held by %s (age: %v)",
-			n.id, dataItemID, lock.clientID, time.Since(lock.lockedAt))
 		return false
 	}
 
@@ -965,7 +966,6 @@ func (n *Node) acquireLock(dataItemID int32, clientID string, timestamp int64) b
 		timestamp: timestamp,
 		lockedAt:  time.Now(),
 	}
-	log.Printf("Node %d: Lock on item %d GRANTED to %s", n.id, dataItemID, clientID)
 	return true
 }
 
@@ -974,15 +974,10 @@ func (n *Node) releaseLock(dataItemID int32, clientID string, timestamp int64) {
 	n.lockMu.Lock()
 	defer n.lockMu.Unlock()
 
-	// Check if lock exists
+	// Only release if held by this client
 	if lock, exists := n.locks[dataItemID]; exists {
-		// Only release if held by this client
 		if lock.clientID == clientID && lock.timestamp == timestamp {
 			delete(n.locks, dataItemID)
-			log.Printf("Node %d: Lock on item %d RELEASED by %s", n.id, dataItemID, clientID)
-		} else {
-			log.Printf("Node %d: Lock release DENIED - item %d not held by %s (held by %s)",
-				n.id, dataItemID, clientID, lock.clientID)
 		}
 	}
 }
@@ -1020,9 +1015,7 @@ func (n *Node) acquireLocks(items []int32, clientID string, timestamp int64) (bo
 		if n.acquireLock(item, clientID, timestamp) {
 			acquired = append(acquired, item)
 		} else {
-			// Failed to acquire this lock, release all previously acquired locks
-			log.Printf("Node %d: Failed to acquire lock on item %d, releasing %d locks",
-				n.id, item, len(acquired))
+			// Failed - release all previously acquired locks
 			for _, relItem := range acquired {
 				n.releaseLock(relItem, clientID, timestamp)
 			}
@@ -1030,7 +1023,6 @@ func (n *Node) acquireLocks(items []int32, clientID string, timestamp int64) (bo
 		}
 	}
 
-	log.Printf("Node %d: Successfully acquired %d locks for %s", n.id, len(acquired), clientID)
 	return true, acquired
 }
 

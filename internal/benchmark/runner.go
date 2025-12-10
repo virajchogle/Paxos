@@ -196,9 +196,27 @@ func (br *BenchmarkRunner) generateWorkload() {
 func (br *BenchmarkRunner) worker(clientID int) {
 	defer br.wg.Done()
 
-	client := br.clients[clientID%len(br.clients)]
-
 	for txn := range br.txnChan {
+		// Route to correct cluster based on sender
+		// Cluster 1: items 1-3000 -> nodes 0,1,2 (clients[0-2])
+		// Cluster 2: items 3001-6000 -> nodes 3,4,5 (clients[3-5])
+		// Cluster 3: items 6001-9000 -> nodes 6,7,8 (clients[6-8])
+		var clusterOffset int
+		if txn.Sender <= 3000 {
+			clusterOffset = 0
+		} else if txn.Sender <= 6000 {
+			clusterOffset = 3
+		} else {
+			clusterOffset = 6
+		}
+		// Pick a random node within the cluster
+		nodeInCluster := clientID % 3
+		clientIdx := clusterOffset + nodeInCluster
+		if clientIdx >= len(br.clients) {
+			clientIdx = clusterOffset // fallback to first node in cluster
+		}
+		client := br.clients[clientIdx]
+
 		start := time.Now()
 		success, err := br.executeTransaction(client, txn)
 		latency := time.Since(start)

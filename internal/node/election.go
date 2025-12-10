@@ -549,17 +549,16 @@ func (n *Node) processNewView(req *pb.NewViewRequest) {
 		}
 		n.logMu.Unlock()
 
-		// Now try to execute
-		n.logMu.RLock()
-		entry, exists := n.log[seq]
-		n.logMu.RUnlock()
+		if !ok {
+			// Still missing this entry
+			log.Printf("Node %d: ⚠️  Still missing seq %d after NEW-VIEW - waiting for data", n.id, seq)
+			break
+		}
 
-		if exists && (entry.Status == "C" || entry.Status == "E") {
-			n.executeTransaction(seq, entry)
-		} else {
-			// 🔥 FIX: Don't fill gaps with NO-OPs! This causes database divergence.
-			log.Printf("Node %d: ⚠️  Still missing seq %d after NEW-VIEW - waiting for data (NOT filling with NO-OP)", n.id, seq)
-			break // Stop trying to execute further sequences
+		// Signal background thread to execute
+		select {
+		case n.execNotify <- struct{}{}:
+		default:
 		}
 	}
 
