@@ -11,55 +11,27 @@ import (
 	pb "paxos-banking/proto"
 )
 
-// ============================================================================
-// FULL TWO-PHASE COMMIT IMPLEMENTATION (Per Specification)
-// ============================================================================
-//
-// CORRECTED PROTOCOL FLOW (WITH PARALLELISM):
-// 1. Client → Coordinator: REQUEST with cross-shard transaction
-// 2. Coordinator checks: no lock on sender, balance >= amount
-// 3. Coordinator locks sender item
-// 4. **PARALLEL EXECUTION**:
-//    - Coordinator → Participant: PREPARE message (non-blocking)
-//    - Coordinator: Run Paxos PREPARE ('P') in own cluster
-// 5. Wait for BOTH:
-//    - Own Paxos consensus achieved
-//    - PREPARED message received from participant
-// 6. Coordinator: Run Paxos COMMIT ('C') with SAME sequence number
-// 7. Coordinator → Participant: COMMIT message
-// 8. Both release locks, delete WAL
-//
-// KEY: Steps 4-5 happen IN PARALLEL for performance
-// ============================================================================
-
-// TwoPCState tracks active 2PC transactions
 type TwoPCState struct {
 	mu           sync.RWMutex
 	transactions map[string]*TwoPCTransaction // txnID -> state
 }
 
-// TwoPCTransaction represents a 2PC transaction in progress
 type TwoPCTransaction struct {
 	TxnID       string
 	Transaction *pb.Transaction
 	ClientID    string
 	Timestamp   int64
-	Phase       string // "PREPARE", "COMMIT", "ABORT"
-	PrepareSeq  int32  // Sequence number for prepare phase (REUSED for commit)
-	CommitSeq   int32  // Sequence number for commit phase
+	Phase       string
+	PrepareSeq  int32
+	CommitSeq   int32
 	Prepared    bool
 	Committed   bool
 	LockedItems []int32
-	WALEntries  map[int32]int32 // item_id -> old_balance (for rollback)
+	WALEntries  map[int32]int32
 	CreatedAt   time.Time
 	LastContact time.Time
 }
 
-// ============================================================================
-// COORDINATOR ROLE
-// ============================================================================
-
-// TwoPCCoordinator implements the coordinator role for cross-shard transactions
 func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp int64) (bool, error) {
 	txnID := fmt.Sprintf("2pc-%s-%d", clientID, timestamp)
 
@@ -70,43 +42,29 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	n.clientMu.RUnlock()
 
 	if hasReply && hasTS && timestamp <= lastTS {
-		log.Printf("Node %d: 2PC[%s]: Duplicate request - returning cached result", n.id, txnID)
 		return lastReply.Success && lastReply.Result == pb.ResultType_SUCCESS, nil
 	}
 
-	log.Printf("Node %d: 🎯 2PC START [%s]: %d→%d:%d (COORDINATOR)", n.id, txnID, tx.Sender, tx.Receiver, tx.Amount)
+	log.Printf("Node %d: 2PC[%s] %d→%d:%d", n.id, txnID, tx.Sender, tx.Receiver, tx.Amount)
 
 	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
 	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
 
-	// ========================================================================
-	// PHASE 1: PREPARE
-	// ========================================================================
-	log.Printf("Node %d: 2PC[%s]: PHASE 1 - PREPARE", n.id, txnID)
-
-	// Step 1: Check and lock sender item
 	n.balanceMu.Lock()
 
-	// Check if sender is locked
 	senderLock, senderLocked := n.locks[tx.Sender]
 	if senderLocked && senderLock.clientID != clientID {
 		n.balanceMu.Unlock()
-		log.Printf("Node %d: 2PC[%s]: ❌ Sender item %d locked by %s", n.id, txnID, tx.Sender, senderLock.clientID)
 		n.cacheResult(clientID, timestamp, false, pb.ResultType_FAILED)
 		return false, fmt.Errorf("sender item locked")
 	}
 
-	// Check balance
 	senderBalance := n.balances[tx.Sender]
 	if senderBalance < tx.Amount {
 		n.balanceMu.Unlock()
-		log.Printf("Node %d: 2PC[%s]: ❌ Insufficient balance (have %d, need %d)", n.id, txnID, senderBalance, tx.Amount)
 		n.cacheResult(clientID, timestamp, false, pb.ResultType_INSUFFICIENT_BALANCE)
 		return false, fmt.Errorf("insufficient balance")
 	}
-
-	// Lock sender item and save old balance to WAL
-	log.Printf("Node %d: 2PC[%s]: 🔒 Locking sender item %d (balance: %d)", n.id, txnID, tx.Sender, senderBalance)
 	n.locks[tx.Sender] = &DataItemLock{
 		clientID:  clientID,
 		timestamp: timestamp,
@@ -131,14 +89,8 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 
 	n.balanceMu.Unlock()
 
-	// ========================================================================
-	// PARALLEL EXECUTION: Send PREPARE + Run own Paxos simultaneously
-	// ========================================================================
-
-	// Get receiver client before spawning goroutine
 	receiverClient, err := n.getCrossClusterClient(int32(receiverLeader))
 	if err != nil {
-		log.Printf("Node %d: 2PC[%s]: ❌ Cannot connect to participant: %v", n.id, txnID, err)
 		n.cleanup2PCCoordinator(txnID, false)
 		n.cacheResult(clientID, timestamp, false, pb.ResultType_FAILED)
 		return false, fmt.Errorf("participant unreachable: %v", err)
@@ -150,7 +102,6 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 		Transaction: tx,
 	}
 
-	// Channels for parallel execution
 	type coordinatorResult struct {
 		reply *pb.TransactionReply
 		seq   int32
@@ -164,14 +115,9 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	coordChan := make(chan coordinatorResult, 1)
 	partChan := make(chan participantResult, 1)
 
-	// Step 2: Send PREPARE to participant (parallel, non-blocking)
 	go func() {
-		log.Printf("Node %d: 2PC[%s]: Sending PREPARE to participant cluster %d leader %d",
-			n.id, txnID, receiverCluster, receiverLeader)
-
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-
 		prepareMsg := &pb.TwoPCPrepareRequest{
 			TransactionId: txnID,
 			Transaction:   tx,
@@ -179,21 +125,14 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 			Timestamp:     timestamp,
 			CoordinatorId: n.id,
 		}
-
 		preparedReply, err := receiverClient.TwoPCPrepare(ctx, prepareMsg)
 		partChan <- participantResult{reply: preparedReply, err: err}
 	}()
 
-	// Step 3: Run Paxos in coordinator cluster (parallel)
 	go func() {
-		log.Printf("Node %d: 2PC[%s]: Running Paxos for PREPARE phase (marker: 'P')", n.id, txnID)
-
 		prepareReply, prepareSeq, err := n.processAsLeaderWithPhaseAndSeq(prepareReq, "P", 0)
 		coordChan <- coordinatorResult{reply: prepareReply, seq: prepareSeq, err: err}
 	}()
-
-	// Step 4: Wait for BOTH to complete
-	log.Printf("Node %d: 2PC[%s]: Waiting for both coordinator Paxos and participant PREPARED", n.id, txnID)
 
 	var coordResult coordinatorResult
 	var partResult participantResult
@@ -205,16 +144,11 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 		case coordResult = <-coordChan:
 			receivedCoord = true
 			if coordResult.err != nil || !coordResult.reply.Success {
-				log.Printf("Node %d: 2PC[%s]: ❌ Coordinator PREPARE consensus failed: %v", n.id, txnID, coordResult.err)
-				// Wait for participant response before aborting
 				if !receivedPart {
 					partResult = <-partChan
 				}
 				return n.coordinatorAbort(txnID, clientID, timestamp, receiverClient, "coordinator prepare failed")
 			}
-			log.Printf("Node %d: 2PC[%s]: ✅ Coordinator PREPARE complete (seq: %d)", n.id, txnID, coordResult.seq)
-
-			// Save sequence number for reuse in COMMIT phase
 			n.balanceMu.Lock()
 			if txState, exists := n.twoPCState.transactions[txnID]; exists {
 				txState.PrepareSeq = coordResult.seq
@@ -228,101 +162,59 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 				if partResult.reply != nil {
 					errorMsg = partResult.reply.Message
 				}
-				log.Printf("Node %d: 2PC[%s]: ❌ Participant PREPARE failed: %s", n.id, txnID, errorMsg)
-
-				// Check if failure is due to lock conflict
 				isLockConflict := partResult.reply != nil && len(partResult.reply.Message) >= 7 && partResult.reply.Message[:7] == "LOCKED:"
-
-				// Wait for coordinator response before aborting
 				if !receivedCoord {
 					coordResult = <-coordChan
 				}
-
-				// If lock conflict, mark as permanently failed (not retryable)
 				if isLockConflict {
-					log.Printf("Node %d: 2PC[%s]: ❌ LOCK CONFLICT - transaction permanently FAILED (will NOT be retried)", n.id, txnID)
-					// Abort and cache result as permanently FAILED
 					n.coordinatorAbort(txnID, clientID, timestamp, receiverClient, fmt.Sprintf("lock conflict: %s", errorMsg))
-					// Cache result to prevent any retries
 					n.cacheResult(clientID, timestamp, false, pb.ResultType_FAILED)
 					return false, fmt.Errorf("transaction permanently failed due to lock conflict: %s", errorMsg)
 				}
-
 				return n.coordinatorAbort(txnID, clientID, timestamp, receiverClient, fmt.Sprintf("participant prepare failed: %s", errorMsg))
 			}
-			log.Printf("Node %d: 2PC[%s]: ✅ Participant PREPARED", n.id, txnID)
 		}
 	}
 
-	// Both PREPARE phases completed successfully!
-	log.Printf("Node %d: 2PC[%s]: ✅ PREPARE phase complete on both clusters", n.id, txnID)
-
-	// ========================================================================
-	// PHASE 2: COMMIT
-	// ========================================================================
-	log.Printf("Node %d: 2PC[%s]: PHASE 2 - COMMIT", n.id, txnID)
-
-	// Get the sequence number from PREPARE phase
 	n.balanceMu.RLock()
 	txState, exists := n.twoPCState.transactions[txnID]
 	if !exists || txState == nil {
 		n.balanceMu.RUnlock()
-		log.Printf("Node %d: 2PC[%s]: ❌ CRITICAL ERROR - transaction state missing in COMMIT phase", n.id, txnID)
 		return n.coordinatorAbort(txnID, clientID, timestamp, receiverClient, "transaction state lost")
 	}
 	prepareSeq := txState.PrepareSeq
 	n.balanceMu.RUnlock()
 
-	// Step 2a: Run Paxos to replicate COMMIT entry with SAME sequence number
-	log.Printf("Node %d: 2PC[%s]: Running Paxos for COMMIT phase (marker: 'C', reusing seq: %d)", n.id, txnID, prepareSeq)
-
 	commitReply, _, err := n.processAsLeaderWithPhaseAndSeq(prepareReq, "C", prepareSeq)
 	if err != nil || commitReply == nil || !commitReply.Success {
-		// Determine failure reason from reply or error
 		failureReason := "unknown"
 		if commitReply != nil && commitReply.Message != "" {
 			failureReason = commitReply.Message
 		} else if err != nil {
 			failureReason = err.Error()
 		}
-
-		log.Printf("Node %d: 2PC[%s]: ❌ COMMIT consensus failed: %s", n.id, txnID, failureReason)
-		// This is bad - participant prepared but we can't commit
 		return n.coordinatorAbort(txnID, clientID, timestamp, receiverClient, fmt.Sprintf("commit consensus failed: %s", failureReason))
 	}
-
-	log.Printf("Node %d: 2PC[%s]: ✅ COMMIT replicated in coordinator cluster", n.id, txnID)
-
-	// Step 2b: Send COMMIT to participant (non-blocking with background retry)
-	log.Printf("Node %d: 2PC[%s]: Sending COMMIT to participant", n.id, txnID)
 
 	commitMsg := &pb.TwoPCCommitRequest{
 		TransactionId: txnID,
 		CoordinatorId: n.id,
 	}
 
-	// Send initial COMMIT message (non-blocking - spawn goroutine for retries)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-
 		commitAck, err := receiverClient.TwoPCCommit(ctx, commitMsg)
 		if err != nil || !commitAck.Success {
-			log.Printf("Node %d: 2PC[%s]: ⚠️  Participant COMMIT ACK not received, retrying in background...", n.id, txnID)
-			// Retry in background (participant may be slow or message lost)
 			for retry := 0; retry < 5; retry++ {
 				time.Sleep(1 * time.Second)
 				ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 				commitAck, err = receiverClient.TwoPCCommit(ctx2, commitMsg)
 				cancel2()
 				if err == nil && commitAck.Success {
-					log.Printf("Node %d: 2PC[%s]: ✅ Participant ACK received after retry %d", n.id, txnID, retry+1)
 					return
 				}
 			}
-			log.Printf("Node %d: 2PC[%s]: ⚠️  Participant ACK not received after retries (participant will commit eventually)", n.id, txnID)
-		} else {
-			log.Printf("Node %d: 2PC[%s]: ✅ Participant ACK received", n.id, txnID)
 		}
 	}()
 
@@ -467,15 +359,12 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 
 	// Lock receiver item and save old balance to WAL
 	receiverBalance := n.balances[tx.Receiver]
-	log.Printf("Node %d: 2PC[%s]: 🔒 Locking receiver item %d (balance: %d)", n.id, txnID, tx.Receiver, receiverBalance)
-
 	n.locks[tx.Receiver] = &DataItemLock{
 		clientID:  req.ClientId,
 		timestamp: req.Timestamp,
 		lockedAt:  time.Now(),
 	}
 
-	// Initialize 2PC state for participant
 	if n.twoPCState.transactions == nil {
 		n.twoPCState.transactions = make(map[string]*TwoPCTransaction)
 	}
@@ -490,11 +379,7 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 		CreatedAt:   time.Now(),
 		LastContact: time.Now(),
 	}
-
 	n.balanceMu.Unlock()
-
-	// Run Paxos to replicate PREPARE entry in participant cluster (marker: 'P')
-	log.Printf("Node %d: 2PC[%s]: Running Paxos for PREPARE phase (marker: 'P')", n.id, txnID)
 
 	prepareReq := &pb.TransactionRequest{
 		ClientId:    req.ClientId,
@@ -504,15 +389,12 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 
 	prepareReply, prepareSeq, err := n.processAsLeaderWithPhaseAndSeq(prepareReq, "P", 0)
 	if err != nil || prepareReply == nil || !prepareReply.Success {
-		// Determine failure reason from reply or error
 		failureReason := "unknown"
 		if prepareReply != nil && prepareReply.Message != "" {
 			failureReason = prepareReply.Message
 		} else if err != nil {
 			failureReason = err.Error()
 		}
-
-		log.Printf("Node %d: 2PC[%s]: ❌ PREPARE consensus failed: %s", n.id, txnID, failureReason)
 		n.cleanup2PCParticipant(txnID, false)
 		return &pb.TwoPCPrepareReply{
 			Success:       false,
@@ -522,14 +404,11 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 		}, nil
 	}
 
-	// Save sequence number for reuse in COMMIT phase
 	n.balanceMu.Lock()
 	if txState, exists := n.twoPCState.transactions[txnID]; exists {
 		txState.PrepareSeq = prepareSeq
 	}
 	n.balanceMu.Unlock()
-
-	log.Printf("Node %d: 2PC[%s]: ✅ PREPARE replicated (seq: %d), transaction executed, WAL updated", n.id, txnID, prepareSeq)
 
 	return &pb.TwoPCPrepareReply{
 		Success:       true,
@@ -539,29 +418,23 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 	}, nil
 }
 
-// TwoPCCommit handles COMMIT requests from coordinator
 func (n *Node) TwoPCCommit(ctx context.Context, req *pb.TwoPCCommitRequest) (*pb.TwoPCCommitReply, error) {
 	txnID := req.TransactionId
-
-	log.Printf("Node %d: 2PC[%s]: Received COMMIT request (PARTICIPANT)", n.id, txnID)
 
 	n.balanceMu.RLock()
 	txState, exists := n.twoPCState.transactions[txnID]
 	n.balanceMu.RUnlock()
 
 	if !exists {
-		log.Printf("Node %d: 2PC[%s]: ⚠️  Transaction state not found", n.id, txnID)
 		return &pb.TwoPCCommitReply{
-			Success:       true, // Assume already committed
+			Success:       true,
 			TransactionId: txnID,
-			Message:       "transaction not found (possibly already committed)",
+			Message:       "already committed",
 			ParticipantId: n.id,
 		}, nil
 	}
 
-	// Run Paxos to replicate COMMIT entry with SAME sequence number (marker: 'C')
 	prepareSeq := txState.PrepareSeq
-	log.Printf("Node %d: 2PC[%s]: Running Paxos for COMMIT phase (marker: 'C', reusing seq: %d)", n.id, txnID, prepareSeq)
 
 	commitReq := &pb.TransactionRequest{
 		ClientId:    txState.ClientID,

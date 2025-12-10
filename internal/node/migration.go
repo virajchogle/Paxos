@@ -11,33 +11,22 @@ import (
 	pb "paxos-banking/proto"
 )
 
-// ============================================================================
-// PHASE 9: SHARD REDISTRIBUTION / DATA MIGRATION
-// ============================================================================
-
-// MigrationState tracks migration state for a node
 type MigrationState struct {
-	mu sync.RWMutex
-
-	// Active migrations
+	mu               sync.RWMutex
 	activeMigrations map[string]*ActiveMigration
-
-	// Pending items (locked for migration)
-	pendingItems map[int32]string // itemID -> migrationID
+	pendingItems     map[int32]string
 }
 
-// ActiveMigration represents an active migration for this node
 type ActiveMigration struct {
 	ID             string
 	StartTime      time.Time
-	Role           string // "source" or "target"
+	Role           string
 	Items          []int32
-	TargetClusters map[int32]int32 // itemID -> targetCluster
-	ReceivedItems  map[int32]int32 // itemID -> balance (for target)
+	TargetClusters map[int32]int32
+	ReceivedItems  map[int32]int32
 	Status         string
 }
 
-// initMigration initializes migration state on a node
 func (n *Node) initMigration() {
 	n.balanceMu.Lock()
 	defer n.balanceMu.Unlock()
@@ -62,17 +51,12 @@ func (n *Node) RecordTransactionAccess(sender, receiver int32, isCross bool) {
 	n.accessTracker.RecordTransaction(sender, receiver, isCross)
 }
 
-// MigrationPrepare prepares items for migration (locks them)
 func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareRequest) (*pb.MigrationPrepareReply, error) {
-	log.Printf("Node %d: 📦 MigrationPrepare - migration %s, %d items",
-		n.id, req.MigrationId, len(req.ItemIds))
-
 	n.initMigration()
 
 	n.migrationState.mu.Lock()
 	defer n.migrationState.mu.Unlock()
 
-	// Check if migration already exists
 	if _, exists := n.migrationState.activeMigrations[req.MigrationId]; exists {
 		return &pb.MigrationPrepareReply{
 			Success:     false,
@@ -81,7 +65,6 @@ func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareReq
 		}, nil
 	}
 
-	// Check if any items are already locked for migration
 	for _, itemID := range req.ItemIds {
 		if existingMigID, locked := n.migrationState.pendingItems[itemID]; locked {
 			return &pb.MigrationPrepareReply{
@@ -92,24 +75,18 @@ func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareReq
 		}
 	}
 
-	// Lock items
 	preparedItems := make([]int32, 0, len(req.ItemIds))
 	for _, itemID := range req.ItemIds {
-		// Verify we own this item
 		n.balanceMu.RLock()
 		_, exists := n.balances[itemID]
 		n.balanceMu.RUnlock()
-
 		if !exists {
-			log.Printf("Node %d: Warning - item %d not found in local database", n.id, itemID)
 			continue
 		}
-
 		n.migrationState.pendingItems[itemID] = req.MigrationId
 		preparedItems = append(preparedItems, itemID)
 	}
 
-	// Create migration record
 	n.migrationState.activeMigrations[req.MigrationId] = &ActiveMigration{
 		ID:             req.MigrationId,
 		StartTime:      time.Now(),
@@ -118,8 +95,6 @@ func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareReq
 		TargetClusters: req.TargetClusters,
 		Status:         "prepared",
 	}
-
-	log.Printf("Node %d: ✅ Prepared %d items for migration %s", n.id, len(preparedItems), req.MigrationId)
 
 	return &pb.MigrationPrepareReply{
 		Success:       true,

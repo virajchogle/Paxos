@@ -319,21 +319,12 @@ func (m *ClientManager) processNextSet() {
 		return
 	}
 
-	// Clear transaction history for this new test set
-	// (printreshard should only analyze transactions from current test set)
 	m.txnHistoryMu.Lock()
 	m.txnHistory = nil
 	m.txnHistoryMu.Unlock()
-
-	// Reset client-side metrics for this test set
 	m.resetClientMetrics()
 
-	// BOOTSTRAP: Treat every test set as a fresh start
-	// This prevents split-brain issues and ensures clean leader elections
-
-	// Step 1: Flush state if not first test set
 	if m.currentSet > 0 {
-		fmt.Println("\n🔄 Flushing system state before next test set...")
 		m.flushAllNodes()
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -341,59 +332,32 @@ func (m *ClientManager) processNextSet() {
 	set := m.testSets[m.currentSet]
 	m.currentSet++
 
-	fmt.Printf("\n╔════════════════════════════════════════╗\n")
-	fmt.Printf("║  Processing Test Set %d               ║\n", set.SetNumber)
-	fmt.Printf("╚════════════════════════════════════════╝\n")
-	fmt.Printf("Active Nodes: %v\n", set.ActiveNodes)
-	fmt.Printf("Commands: %d\n", len(set.Commands))
+	fmt.Printf("\n=== Test Set %d (Nodes: %v, Commands: %d) ===\n",
+		set.SetNumber, set.ActiveNodes, len(set.Commands))
 
-	// Check if we have quorum
 	hasQuorum := len(set.ActiveNodes) >= 3
 	if !hasQuorum {
-		fmt.Printf("⚠️  WARNING: Only %d active nodes - NO QUORUM! Transactions will be queued.\n", len(set.ActiveNodes))
+		fmt.Printf("⚠️  No quorum (%d nodes)\n", len(set.ActiveNodes))
 	}
-	fmt.Println()
 
-	// Step 2: BOOTSTRAP - Set ALL nodes to INACTIVE first
-	fmt.Printf("🔄 BOOTSTRAP: Setting all nodes to INACTIVE...\n")
+	// Bootstrap: deactivate all, then activate required nodes
 	for nodeID := int32(1); nodeID <= 9; nodeID++ {
-		if err := m.setNodeActive(nodeID, false); err != nil {
-			// Ignore errors - node might already be inactive
-		}
+		m.setNodeActive(nodeID, false)
 	}
-
-	// Wait for all nodes to become inactive and clear leader state
-	fmt.Printf("⏳ Waiting for all nodes to become inactive...\n")
 	time.Sleep(200 * time.Millisecond)
 
-	// Step 3: Activate ONLY the required nodes for this test set
-	fmt.Printf("✅ Activating nodes %v...\n", set.ActiveNodes)
 	for _, nodeID := range set.ActiveNodes {
-		if err := m.setNodeActive(nodeID, true); err != nil {
-			fmt.Printf("    ⚠️  Warning: Failed to activate node %d: %v\n", nodeID, err)
-		}
+		m.setNodeActive(nodeID, true)
 	}
 
-	// Step 4: Send initial request to expected leaders (n1, n4, n7) to trigger election
-	// This ensures consistent leader election (these nodes are favored)
-	fmt.Printf("⏳ Triggering leader election on expected leaders (n1, n4, n7)...\n")
-
-	// Determine which expected leaders are active
+	// Trigger elections on expected leaders
 	activeMap := make(map[int32]bool)
 	for _, nodeID := range set.ActiveNodes {
 		activeMap[nodeID] = true
 	}
-
-	// Send a no-op to each cluster's expected leader if they're active
-	// Use cluster-appropriate data items to trigger elections
-	expectedLeaders := map[int32]int32{
-		1: 1,    // Node 1 → query item 1 (cluster 1)
-		4: 3001, // Node 4 → query item 3001 (cluster 2)
-		7: 6001, // Node 7 → query item 6001 (cluster 3)
-	}
+	expectedLeaders := map[int32]int32{1: 1, 4: 3001, 7: 6001}
 	for leaderID, dataItem := range expectedLeaders {
 		if activeMap[leaderID] {
-			// Trigger election by querying a balance from that node's cluster
 			if nodeClient, exists := m.nodeClients[leaderID]; exists {
 				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 				nodeClient.QueryBalance(ctx, &pb.BalanceQueryRequest{DataItemId: dataItem})
@@ -402,62 +366,39 @@ func (m *ClientManager) processNextSet() {
 		}
 	}
 
-	// Give nodes time to elect leader and stabilize
-	fmt.Printf("⏳ Waiting for leader election to complete...\n")
-	time.Sleep(1000 * time.Millisecond) // 1 second for elections to complete
+	time.Sleep(1000 * time.Millisecond)
 
-	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
-
-	// Process commands with configurable parallelism
-	// Transactions can be parallel, but fail/recover/balance must be sequential
-	const PARALLEL_TRANSACTIONS = 5 // Number of concurrent transactions (reduced from 10 to prevent overload)
+	const PARALLEL_TRANSACTIONS = 5
 
 	successCount := 0
 	pendingTxns := []utils.Command{}
 
-	for i, cmd := range set.Commands {
+	for _, cmd := range set.Commands {
 		switch cmd.Type {
 		case "fail":
-			// Before fail, flush any pending parallel transactions
 			if len(pendingTxns) > 0 {
 				successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
 				pendingTxns = nil
 			}
-
-			// F(ni) - Fail node
-			fmt.Printf("💥 [%d/%d] F(n%d) - Failing node %d...\n", i+1, len(set.Commands), cmd.NodeID, cmd.NodeID)
-			if err := m.setNodeActive(cmd.NodeID, false); err != nil {
-				fmt.Printf("    ⚠️  Failed to deactivate node %d: %v\n", cmd.NodeID, err)
-			} else {
-				fmt.Printf("    ✅ Node %d deactivated\n", cmd.NodeID)
-			}
-			time.Sleep(500 * time.Millisecond) // Give time for failure to propagate
+			fmt.Printf("F(n%d)\n", cmd.NodeID)
+			m.setNodeActive(cmd.NodeID, false)
+			time.Sleep(500 * time.Millisecond)
 
 		case "recover":
-			// Before recover, flush any pending parallel transactions
 			if len(pendingTxns) > 0 {
 				successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
 				pendingTxns = nil
 			}
-
-			// R(ni) - Recover node
-			fmt.Printf("🔄 [%d/%d] R(n%d) - Recovering node %d...\n", i+1, len(set.Commands), cmd.NodeID, cmd.NodeID)
-			if err := m.setNodeActive(cmd.NodeID, true); err != nil {
-				fmt.Printf("    ⚠️  Failed to activate node %d: %v\n", cmd.NodeID, err)
-			} else {
-				fmt.Printf("    ✅ Node %d activated\n", cmd.NodeID)
-			}
-			time.Sleep(1 * time.Second) // Give time for recovery
+			fmt.Printf("R(n%d)\n", cmd.NodeID)
+			m.setNodeActive(cmd.NodeID, true)
+			time.Sleep(1 * time.Second)
 
 		case "balance":
-			// Before balance query, flush any pending parallel transactions
 			if len(pendingTxns) > 0 {
 				successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
 				pendingTxns = nil
 			}
-
-			// Balance query (read-only)
-			fmt.Printf("📖 [%d/%d] Balance query for item %d...\n", i+1, len(set.Commands), cmd.Transaction.Sender)
+			fmt.Printf("Balance(%d)\n", cmd.Transaction.Sender)
 			m.queryBalance(fmt.Sprintf("%d", cmd.Transaction.Sender))
 
 		case "transaction":
@@ -475,46 +416,28 @@ func (m *ClientManager) processNextSet() {
 	queueSize := len(m.pendingQueue)
 	m.mu.Unlock()
 
-	fmt.Printf("\n✅ Test Set %d execution completed! (%d successful, %d queued)\n",
-		set.SetNumber, successCount, queueSize)
-
-	// Immediately retry queued transactions in a loop until queue is empty or no progress
+	fmt.Printf("\nTest Set %d: %d successful", set.SetNumber, successCount)
 	if queueSize > 0 {
-		fmt.Printf("\n🔄 Processing queued transactions...\n")
 		totalRetried := m.retryQueuedTransactionsUntilDone()
 		successCount += totalRetried
-
 		m.mu.Lock()
 		finalQueueSize := len(m.pendingQueue)
 		m.mu.Unlock()
-
 		if finalQueueSize > 0 {
-			fmt.Printf("⚠️  %d transactions could not be completed\n", finalQueueSize)
+			fmt.Printf(", %d failed", finalQueueSize)
 		}
 	}
-
-	fmt.Printf("\n✅ Test Set %d final: %d successful\n", set.SetNumber, successCount)
+	fmt.Println()
 }
 
-// retryQueuedTransactionsUntilDone aggressively retries queued transactions until queue is empty or no progress
-// Returns total number of transactions that succeeded
 func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
 	totalSuccess := 0
-	round := 0
-
 	for {
-		round++
 		m.mu.Lock()
-		queueSize := len(m.pendingQueue)
-		if queueSize == 0 {
+		if len(m.pendingQueue) == 0 {
 			m.mu.Unlock()
-			if round > 1 {
-				fmt.Printf("✅ All queued transactions completed after %d rounds\n", round-1)
-			}
 			return totalSuccess
 		}
-
-		// Copy queue and clear it
 		queuedCmds := make([]utils.Command, len(m.pendingQueue))
 		copy(queuedCmds, m.pendingQueue)
 		m.pendingQueue = make([]utils.Command, 0)
@@ -523,40 +446,21 @@ func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
 		roundSuccess := 0
 		for _, cmd := range queuedCmds {
 			if cmd.Type != "transaction" {
-				continue // Only retry transactions
+				continue
 			}
-
 			txn := cmd.Transaction
-			err := m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount)
-			if err == nil {
-				// Success!
-				senderCluster := m.getClusterForDataItem(txn.Sender)
-				receiverCluster := m.getClusterForDataItem(txn.Receiver)
-				if senderCluster == receiverCluster {
-					fmt.Printf("   ✅ Retry: %d → %d: %d units (Cluster %d)\n",
-						txn.Sender, txn.Receiver, txn.Amount, senderCluster)
-				} else {
-					fmt.Printf("   ✅ Retry: %d → %d: %d units (C%d→C%d cross-shard)\n",
-						txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster)
-				}
+			if m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount) == nil {
 				roundSuccess++
 			} else {
-				// Still failing - re-queue
 				m.mu.Lock()
 				m.pendingQueue = append(m.pendingQueue, cmd)
 				m.mu.Unlock()
 			}
 		}
-
 		totalSuccess += roundSuccess
-
-		// If no progress this round, give up
 		if roundSuccess == 0 {
-			fmt.Printf("⚠️  No progress in round %d, stopping retry loop\n", round)
 			return totalSuccess
 		}
-
-		// Otherwise continue to next round immediately
 	}
 }
 
@@ -1154,70 +1058,20 @@ func (m *ClientManager) showLeader() {
 }
 
 func (m *ClientManager) showHelp() {
-	fmt.Println("\n╔════════════════════════════════════════════════╗")
-	fmt.Println("║   Client Manager Help                          ║")
-	fmt.Println("╚════════════════════════════════════════════════╝")
-	fmt.Println("\nCommands:")
-	fmt.Println("  next")
-	fmt.Println("    Process the next test set from CSV file")
-	fmt.Println("    Transactions are sent sequentially")
-	fmt.Println()
-	fmt.Println("  repeat")
-	fmt.Println("    Repeat the last test set (re-run same transactions)")
-	fmt.Println("    Useful for testing determinism or debugging")
-	fmt.Println()
-	fmt.Println("  status")
-	fmt.Println("    Show current progress and test set info")
-	fmt.Println("    Shows number of queued transactions")
-	fmt.Println()
-	fmt.Println("  leader")
-	fmt.Println("    Show current leader and query all nodes")
-	fmt.Println()
-	fmt.Println("  retry")
-	fmt.Println("    Manually retry all queued transactions")
-	fmt.Println("    (Transactions are auto-retried when quorum restored)")
-	fmt.Println()
-	fmt.Println("  send <sender> <receiver> <amount>")
-	fmt.Println("    Send a single transaction")
-	fmt.Println("    Example: send 100 200 5")
-	fmt.Println()
-	fmt.Println("  balance <id>")
-	fmt.Println("    Quick balance query (single node)")
-	fmt.Println()
-	fmt.Println("  printbalance <id>")
-	fmt.Println("    PrintBalance(id) - Query all 3 nodes in cluster")
-	fmt.Println("    Output format: n4 : 8, n5 : 8, n6 : 10")
-	fmt.Println()
-	fmt.Println("  printdb")
-	fmt.Println("    PrintDB() - Query all 9 nodes in parallel")
-	fmt.Println("    Shows modified balances")
-	fmt.Println()
-	fmt.Println("  printview")
-	fmt.Println("    PrintView() - Show all NEW-VIEW messages")
-	fmt.Println("    Check node logs for detailed output")
-	fmt.Println()
-	fmt.Println("  printreshard")
-	fmt.Println("    PrintReshard() - Analyze and show resharding triplets")
-	fmt.Println("    Outputs triplets: (item_id, c_from, c_to)")
-	fmt.Println()
-	fmt.Println("  executereshard")
-	fmt.Println("    Execute resharding - actually move data items between clusters")
-	fmt.Println("    Run after printreshard to perform the migration")
-	fmt.Println()
-	fmt.Println("  flush")
-	fmt.Println("    FLUSH system state (required between test sets)")
-	fmt.Println("    Resets database, logs, ballots, locks, counters")
-	fmt.Println()
-	fmt.Println("  performance")
-	fmt.Println("    Get performance metrics from all nodes")
-	fmt.Println("    Shows throughput, latency, 2PC stats")
-	fmt.Println()
-	fmt.Println("  help")
-	fmt.Println("    Show this help message")
-	fmt.Println()
-	fmt.Println("  quit")
-	fmt.Println("    Exit the client manager")
-	fmt.Println()
+	fmt.Println(`
+Commands:
+  next/repeat/skip     - Process/repeat/skip test set
+  status/leader        - Show status/leader info
+  send <s> <r> <amt>   - Send transaction
+  balance <id>         - Quick balance query
+  printbalance <id>    - PrintBalance (all cluster nodes)
+  printdb              - PrintDB (all 9 nodes)
+  printview            - PrintView (NEW-VIEW messages)
+  printreshard         - Analyze resharding
+  executereshard       - Execute resharding
+  flush                - Reset system state
+  performance          - Show metrics
+  quit                 - Exit`)
 }
 
 // printBalanceAllNodes implements PrintBalance(id) - query all 3 nodes in the cluster

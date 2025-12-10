@@ -20,7 +20,6 @@ import (
 	pb "paxos-banking/proto"
 )
 
-// DataItemLock represents a lock on a data item
 type DataItemLock struct {
 	clientID  string
 	timestamp int64
@@ -30,73 +29,57 @@ type DataItemLock struct {
 type Node struct {
 	pb.UnimplementedPaxosNodeServer
 
-	// 🔒 FINE-GRAINED LOCKING: Split n.mu into specialized locks
-	// This allows parallel operations on independent state
-	paxosMu   sync.RWMutex // Protects: isLeader, ballots, leaderID, systemInitialized
-	logMu     sync.RWMutex // Protects: log, newViewLog, nextSeqNum, lastExecuted
-	balanceMu sync.RWMutex // Protects: balances (read-heavy, benefits from RWMutex)
-	clientMu  sync.RWMutex // Protects: clientLastReply, clientLastTS
-	execMu    sync.Mutex   // Protects: transaction execution (ensures sequential execution for linearizability)
+	paxosMu   sync.RWMutex
+	logMu     sync.RWMutex
+	balanceMu sync.RWMutex
+	clientMu  sync.RWMutex
+	execMu    sync.Mutex
 
-	// Identity (read-only after init, no lock needed)
 	id        int32
 	clusterID int32
 	address   string
 	config    *config.Config
 
-	// Paxos state (protected by paxosMu)
 	isLeader       bool
 	currentBallot  *types.Ballot
 	promisedBallot *types.Ballot
 	leaderID       int32
 
-	// Sequence tracking (protected by logMu)
 	nextSeqNum   int32
 	lastExecuted int32
+	execNotify   chan struct{}
 
-	// Background execution thread
-	execNotify chan struct{} // Signal when new sequences are committed
-
-	// Logs (protected by logMu)
-	log               map[int32]*types.LogEntry // Single log with status tracking (A/C/E)
+	log               map[int32]*types.LogEntry
 	newViewLog        []*pb.NewViewRequest
-	bootstrapComplete bool // Set after first transaction - only log NEW-VIEWs after this
+	bootstrapComplete bool
 
-	// Client tracking (protected by clientMu)
 	clientLastReply map[string]*pb.TransactionReply
 	clientLastTS    map[string]int64
 
-	// Database (protected by balanceMu) - changed from client IDs to data item IDs
-	balances map[int32]int32 // dataItemID -> balance
+	balances map[int32]int32
 
-	// 📸 Checkpointing (protected by checkpointMu)
-	checkpointMu        sync.RWMutex    // Protects checkpoint state
-	lastCheckpointSeq   int32           // Last sequence number checkpointed
-	checkpointedBalance map[int32]int32 // Snapshot of balances at checkpoint
-	checkpointInterval  int32           // Checkpoint every N executed transactions
-	modifiedItems       map[int32]bool  // Track which items have been modified
+	checkpointMu        sync.RWMutex
+	lastCheckpointSeq   int32
+	checkpointedBalance map[int32]int32
+	checkpointInterval  int32
+	modifiedItems       map[int32]bool
 
-	// Locking mechanism (Phase 2) - has own lockMu
-	lockMu      sync.Mutex              // Separate mutex for lock operations
-	locks       map[int32]*DataItemLock // dataItemID -> Lock
-	lockTimeout time.Duration           // How long to wait for a lock
+	lockMu      sync.Mutex
+	locks       map[int32]*DataItemLock
+	lockTimeout time.Duration
 
-	// Write-Ahead Log (Phase 5) - for 2PC rollback
-	walMu   sync.RWMutex               // Separate mutex for WAL operations
-	wal     map[string]*types.WALEntry // transactionID -> WALEntry
-	walFile string                     // Path to WAL file for persistence
+	walMu   sync.RWMutex
+	wal     map[string]*types.WALEntry
+	walFile string
 
-	// Two-Phase Commit State (Full 2PC Protocol)
-	twoPCState TwoPCState                 // Tracks active 2PC transactions (leader only)
-	twoPCWAL   map[string]map[int32]int32 // txnID -> (itemID -> oldBalance) - ALL nodes
+	twoPCState TwoPCState
+	twoPCWAL   map[string]map[int32]int32
 
-	// Communication
 	grpcServer  *grpc.Server
-	peerClients map[int32]pb.PaxosNodeClient // Peers within same cluster
+	peerClients map[int32]pb.PaxosNodeClient
 	peerConns   map[int32]*grpc.ClientConn
 
-	// Cross-cluster communication (for 2PC)
-	allClusterClients map[int32]pb.PaxosNodeClient // All nodes across all clusters
+	allClusterClients map[int32]pb.PaxosNodeClient
 	allClusterConns   map[int32]*grpc.ClientConn
 
 	// Timers

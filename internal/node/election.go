@@ -10,10 +10,8 @@ import (
 	pb "paxos-banking/proto"
 )
 
-// StartLeaderElection initiates leader election (Paxos Phase 1)
 func (n *Node) StartLeaderElection() {
-	// 🔥 FIX: Don't start election if we have gaps in our own log
-	// Check for gaps between lastExecuted and max sequence in log (use logMu)
+	// Check for gaps in log
 	n.logMu.RLock()
 	lastExec := n.lastExecuted
 	maxSeq := lastExec
@@ -22,8 +20,6 @@ func (n *Node) StartLeaderElection() {
 			maxSeq = seq
 		}
 	}
-
-	// Check if there are any gaps
 	hasGaps := false
 	for seq := lastExec + 1; seq < maxSeq; seq++ {
 		if _, exists := n.log[seq]; !exists {
@@ -32,14 +28,10 @@ func (n *Node) StartLeaderElection() {
 		}
 	}
 	n.logMu.RUnlock()
-
 	if hasGaps {
-		log.Printf("Node %d: Cannot start election - have gaps in log (lastExec=%d, maxSeq=%d). Waiting for current leader to fill gaps.",
-			n.id, lastExec, maxSeq)
 		return
 	}
 
-	// Cooldown + guard (use timerMu for lastPrepareTime)
 	n.timerMu.Lock()
 	if time.Since(n.lastPrepareTime) < n.prepareCooldown {
 		n.timerMu.Unlock()
@@ -48,8 +40,6 @@ func (n *Node) StartLeaderElection() {
 	n.lastPrepareTime = time.Now()
 	n.timerMu.Unlock()
 
-	// Compute tentative ballot (use paxosMu)
-	// IMPORTANT: New ballot must be higher than BOTH currentBallot AND promisedBallot
 	n.paxosMu.RLock()
 	maxBallotNum := n.currentBallot.Number
 	if n.promisedBallot.Number > maxBallotNum {
@@ -58,58 +48,40 @@ func (n *Node) StartLeaderElection() {
 	localPromised := types.NewBallot(n.promisedBallot.Number, n.promisedBallot.NodeID)
 	n.paxosMu.RUnlock()
 
-	tentativeNum := maxBallotNum + 1
-	tentative := types.NewBallot(tentativeNum, n.id)
+	tentative := types.NewBallot(maxBallotNum+1, n.id)
+	log.Printf("Node %d: Election ballot %s", n.id, tentative.String())
 
-	log.Printf("Node %d: 🗳️  Starting election with ballot %s", n.id, tentative.String())
-
-	// Snapshot peers (read-only after init, no lock needed)
 	peers := make(map[int32]pb.PaxosNodeClient, len(n.peerClients))
 	for k, v := range n.peerClients {
 		peers[k] = v
 	}
 
-	// Prepare collection: concurrent RPCs
 	type promiseResult struct {
 		reply *pb.PromiseReply
 		err   error
 	}
 	promiseCh := make(chan promiseResult, len(peers)+1)
 	var wg sync.WaitGroup
-
-	// self-promise if allowed
 	promiseCount := 0
 	acceptLogs := make([][]*pb.AcceptedEntry, 0)
 	if tentative.Compare(localPromised) > 0 {
-		// Include our own accept log (getAcceptLog uses logMu internally)
-		selfLog := n.getAcceptLog()
-		acceptLogs = append(acceptLogs, selfLog)
+		acceptLogs = append(acceptLogs, n.getAcceptLog())
 		promiseCount++
-	} else {
-		log.Printf("Node %d: cannot self-promise; promisedBallot=%s", n.id, localPromised.String())
 	}
 
-	// send prepare to peers
 	for pid, client := range peers {
 		wg.Add(1)
 		go func(peerID int32, cli pb.PaxosNodeClient) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
 			defer cancel()
-			req := &pb.PrepareRequest{
-				Ballot: tentative.ToProto(),
-				NodeId: n.id,
-			}
-			resp, err := cli.Prepare(ctx, req)
+			resp, err := cli.Prepare(ctx, &pb.PrepareRequest{Ballot: tentative.ToProto(), NodeId: n.id})
 			promiseCh <- promiseResult{reply: resp, err: err}
 			_ = peerID
 		}(pid, client)
 	}
 
-	go func() {
-		wg.Wait()
-		close(promiseCh)
-	}()
+	go func() { wg.Wait(); close(promiseCh) }()
 
 	timeout := time.After(1000 * time.Millisecond)
 collectLoop:
@@ -119,30 +91,19 @@ collectLoop:
 			if !ok {
 				break collectLoop
 			}
-			if pr.err != nil {
-				// log error and continue
-				continue
-			}
-			if pr.reply != nil && pr.reply.Success {
+			if pr.err == nil && pr.reply != nil && pr.reply.Success {
 				promiseCount++
 				acceptLogs = append(acceptLogs, pr.reply.AcceptLog)
-				log.Printf("Node %d: ✓ PROMISE from node %d", n.id, pr.reply.NodeId)
 			}
-			// early exit when quorum achieved
 			if n.hasQuorum(promiseCount) {
 				break collectLoop
 			}
 		case <-timeout:
-			log.Printf("Node %d: Promise collection timed out", n.id)
 			break collectLoop
 		}
 	}
 
 	if !n.hasQuorum(promiseCount) {
-		log.Printf("Node %d: ✗ No quorum (%d/%d)", n.id, promiseCount, n.quorumSize())
-		// Reset timer to try election again after timeout
-		// This is correct Paxos behavior - keep trying to establish leadership
-		// when nodes come back online, we'll quickly form quorum
 		n.resetLeaderTimer()
 		return
 	}

@@ -17,26 +17,20 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// BenchmarkRunner executes benchmarks
 type BenchmarkRunner struct {
-	config    *BenchmarkConfig
-	workload  *WorkloadGenerator
-	clients   []pb.PaxosNodeClient
-	stats     *Statistics
-	startTime time.Time
-	endTime   time.Time
-
-	// Synchronization
-	wg         sync.WaitGroup
-	stopChan   chan struct{}
-	txnChan    chan *Transaction
-	resultChan chan *Result
-
-	// Rate limiting
+	config      *BenchmarkConfig
+	workload    *WorkloadGenerator
+	clients     []pb.PaxosNodeClient
+	stats       *Statistics
+	startTime   time.Time
+	endTime     time.Time
+	wg          sync.WaitGroup
+	stopChan    chan struct{}
+	txnChan     chan *Transaction
+	resultChan  chan *Result
 	rateLimiter *RateLimiter
 }
 
-// Result represents the result of a single transaction
 type Result struct {
 	Success bool
 	Latency time.Duration
@@ -44,7 +38,6 @@ type Result struct {
 	Error   error
 }
 
-// NewBenchmarkRunner creates a new benchmark runner
 func NewBenchmarkRunner(config *BenchmarkConfig, nodeAddresses []string) (*BenchmarkRunner, error) {
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)

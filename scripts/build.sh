@@ -12,5 +12,6 @@ cd ..
 mkdir -p bin logs
 go build -o bin/node cmd/node/main.go
 go build -o bin/client cmd/client/main.go
+go build -o bin/benchmark cmd/benchmark/main.go
 
-echo "✅ Build complete!"
+echo "Build complete!"

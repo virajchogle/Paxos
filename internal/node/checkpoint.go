@@ -13,31 +13,20 @@ import (
 
 var timeSecond = time.Second
 
-// Checkpoint creates a checkpoint at a specific sequence number
 func (n *Node) Checkpoint(ctx context.Context, req *pb.CheckpointRequest) (*pb.CheckpointReply, error) {
-	log.Printf("Node %d: 📸 Received checkpoint request for seq %d from leader %d",
-		n.id, req.SequenceNumber, req.LeaderId)
-
-	// Verify we're not too far behind
 	n.logMu.RLock()
 	lastExec := n.lastExecuted
 	n.logMu.RUnlock()
 
 	if req.SequenceNumber > lastExec {
-		log.Printf("Node %d: ⚠️  Checkpoint seq %d > lastExecuted %d, waiting to catch up",
-			n.id, req.SequenceNumber, lastExec)
 		return &pb.CheckpointReply{Success: false, NodeId: n.id}, nil
 	}
 
-	// Store checkpoint
 	n.checkpointMu.Lock()
 	n.lastCheckpointSeq = req.SequenceNumber
-
-	// Deep copy the checkpoint state AND track modified items
 	n.checkpointedBalance = make(map[int32]int32)
 	n.modifiedItems = make(map[int32]bool)
 	for k, v := range req.State {
-		// Convert string keys back to int32
 		var itemID int32
 		fmt.Sscanf(k, "%d", &itemID)
 		n.checkpointedBalance[itemID] = v
@@ -45,27 +34,17 @@ func (n *Node) Checkpoint(ctx context.Context, req *pb.CheckpointRequest) (*pb.C
 	}
 	n.checkpointMu.Unlock()
 
-	// Persist checkpoint to disk
 	if err := n.saveCheckpoint(req.SequenceNumber, req.State); err != nil {
-		log.Printf("Node %d: ⚠️  Failed to persist checkpoint: %v", n.id, err)
 		return &pb.CheckpointReply{Success: false, NodeId: n.id}, nil
 	}
 
-	// Truncate log entries before checkpoint
 	n.truncateLogBeforeSeq(req.SequenceNumber)
-
-	log.Printf("Node %d: ✅ Checkpoint created at seq %d, truncated log", n.id, req.SequenceNumber)
 	return &pb.CheckpointReply{Success: true, NodeId: n.id}, nil
 }
 
-// GetCheckpoint retrieves the latest checkpoint
 func (n *Node) GetCheckpoint(ctx context.Context, req *pb.GetCheckpointRequest) (*pb.GetCheckpointReply, error) {
-	log.Printf("Node %d: 📸 GetCheckpoint request from node %d", n.id, req.NodeId)
-
 	n.checkpointMu.RLock()
 	checkpointSeq := n.lastCheckpointSeq
-
-	// Convert checkpoint state to string map for protobuf
 	state := make(map[string]int32)
 	for k, v := range n.checkpointedBalance {
 		state[fmt.Sprintf("%d", k)] = v
@@ -73,7 +52,6 @@ func (n *Node) GetCheckpoint(ctx context.Context, req *pb.GetCheckpointRequest) 
 	n.checkpointMu.RUnlock()
 
 	if checkpointSeq == 0 {
-		log.Printf("Node %d: No checkpoint available yet", n.id)
 		return &pb.GetCheckpointReply{Success: false}, nil
 	}
 

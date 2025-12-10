@@ -11,9 +11,7 @@ import (
 	pb "paxos-banking/proto"
 )
 
-// SubmitTransaction handles client RPCs. This is the client entrypoint.
 func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest) (*pb.TransactionReply, error) {
-	// 🔒 FINE-GRAINED: Use specific locks for different state
 	n.paxosMu.RLock()
 	isLeader := n.isLeader
 	leaderID := n.leaderID
@@ -21,9 +19,6 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 	systemInit := n.systemInitialized
 	n.paxosMu.RUnlock()
 
-	nodeID := n.id // Read-only, no lock needed
-
-	// Lookup last reply (use clientMu)
 	n.clientMu.RLock()
 	lastReply, hasReply := n.clientLastReply[req.ClientId]
 	lastTS, hasTS := n.clientLastTS[req.ClientId]
@@ -33,108 +28,66 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 		return nil, fmt.Errorf("node inactive")
 	}
 
-	// 🎯 Bootstrap: If system not initialized, handle first transaction
 	bootstrapElectionStarted := false
 	if !systemInit {
 		n.paxosMu.Lock()
-		if !n.systemInitialized { // Double-check under lock
+		if !n.systemInitialized {
 			if n.isExpectedLeader() {
-				// Expected leader: Mark system initialized and start election
 				n.systemInitialized = true
 				n.paxosMu.Unlock()
-
-				// Expected leader node: Start leader election immediately
-				log.Printf("Node %d: 🚀 First transaction received - bootstrapping system and starting leader election", nodeID)
-				// Start election directly - no need for timer since we're the expected leader
 				go n.StartLeaderElection()
 				bootstrapElectionStarted = true
 			} else {
-				// Non-expected leader: DON'T set systemInitialized
-				// This prevents timer-based elections from non-expected leaders
 				n.paxosMu.Unlock()
-
-				// Other nodes: Forward to expected leader (n1, n4, or n7) to trigger bootstrap
-				log.Printf("Node %d: 🔄 First transaction received - forwarding to expected leader to bootstrap system", nodeID)
-
-				// Determine which expected leader to forward to based on cluster
-				expectedLeader := int32(1) // Default to n1
+				expectedLeader := int32(1)
 				if n.clusterID == 2 {
 					expectedLeader = 4
 				} else if n.clusterID == 3 {
 					expectedLeader = 7
 				}
-
-				leaderClient, hasLeader := n.peerClients[expectedLeader] // Read-only after init
-				if hasLeader {
-					// Forward to expected leader
+				if leaderClient, hasLeader := n.peerClients[expectedLeader]; hasLeader {
 					ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					resp, err := leaderClient.SubmitTransaction(ctx2, req)
-					if err == nil {
+					if resp, err := leaderClient.SubmitTransaction(ctx2, req); err == nil {
 						return resp, nil
 					}
-					log.Printf("Node %d: Failed to forward to node %d: %v - will wait for election", nodeID, expectedLeader, err)
-				} else {
-					log.Printf("Node %d: Not connected to node %d - will wait for election", nodeID, expectedLeader)
 				}
 			}
 		} else {
 			n.paxosMu.Unlock()
 		}
-
-		// Update local variables after initialization
 		n.paxosMu.RLock()
 		isLeader = n.isLeader
 		leaderID = n.leaderID
 		n.paxosMu.RUnlock()
 	}
 
-	// exactly-once: if request timestamp <= last processed timestamp, resend last reply
 	if hasReply && hasTS && req.Timestamp <= lastTS {
-		log.Printf("Node %d: Duplicate request from %s (ts=%d, last=%d) -> resending", n.id, req.ClientId, req.Timestamp, lastTS)
 		return lastReply, nil
 	}
 
-	// if not leader, forward to leader if known
 	if !isLeader {
-		// leaderID > 0 means we know a leader (leaderID = -1 means uninitialized, 0 means no leader)
 		if leaderID > 0 && leaderID != n.id {
-			client, ok := n.peerClients[leaderID]
-			if ok {
-				// forward to leader RPC and return its reply
+			if client, ok := n.peerClients[leaderID]; ok {
 				ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				resp, err := client.SubmitTransaction(ctx2, req)
-				if err == nil {
+				if resp, err := client.SubmitTransaction(ctx2, req); err == nil {
 					return resp, nil
 				}
-				log.Printf("Node %d: Forward to leader %d failed: %v", n.id, leaderID, err)
-
-				// Forward failed - clear leader and start election
 				n.paxosMu.Lock()
-				n.leaderID = 0 // Clear failed leader
+				n.leaderID = 0
 				n.paxosMu.Unlock()
-
-				// Leader failure detected - start election (any node can do this)
-				log.Printf("Node %d: Leader %d failed, starting election", n.id, leaderID)
 				go n.StartLeaderElection()
 			}
 		}
 
-		// No leader known - start election and wait for it to complete
-		// (unless we already started one during bootstrap)
-		// IMPORTANT: Only expected leaders should start elections on fresh bootstrap
-		// This prevents election storms where all nodes try to become leaders
 		if !bootstrapElectionStarted && n.isExpectedLeader() {
 			go n.StartLeaderElection()
 		}
 
-		// Wait up to 3 seconds for a leader to be elected
 		maxWait := 1000 * time.Millisecond
 		pollInterval := 100 * time.Millisecond
 		deadline := time.Now().Add(maxWait)
-
-		log.Printf("Node %d: No leader, waiting for election to complete...", n.id)
 
 		for time.Now().Before(deadline) {
 			time.Sleep(pollInterval)
@@ -145,16 +98,9 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 			n.paxosMu.RUnlock()
 
 			if nowLeader {
-				// We became leader during the wait - check if cross-shard
-				log.Printf("Node %d: Became leader, processing transaction", n.id)
-
-				// Check if this is a cross-shard transaction (Phase 6: 2PC)
 				tx := req.Transaction
 				senderCluster := n.config.GetClusterForDataItem(tx.Sender)
 				receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-
-				log.Printf("Node %d: 🔍 DEBUG - Transaction %d→%d: senderCluster=%d, receiverCluster=%d, crossShard=%v",
-					n.id, tx.Sender, tx.Receiver, senderCluster, receiverCluster, senderCluster != receiverCluster)
 
 				// ONLY the sender cluster initiates 2PC!
 				if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {

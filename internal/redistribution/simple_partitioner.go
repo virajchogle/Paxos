@@ -6,45 +6,28 @@ import (
 	"sort"
 )
 
-// SimpleGraph represents a graph for data partitioning
-// - Vertices: data items
-// - Edges: transactions (connecting sender and receiver)
 type SimpleGraph struct {
-	// Vertices (data items)
-	Vertices map[int32]*GraphVertex
-
-	// Edges (transactions between items)
-	Edges []*GraphEdge
-
-	// Current partition assignment (vertex -> cluster)
-	Partition map[int32]int32
-
-	// Number of partitions (clusters)
-	NumPartitions int32
-
-	// Partition sizes
+	Vertices       map[int32]*GraphVertex
+	Edges          []*GraphEdge
+	Partition      map[int32]int32
+	NumPartitions  int32
 	PartitionSizes map[int32]int32
-
-	// Total items expected
-	TotalItems int32
+	TotalItems     int32
 }
 
-// GraphVertex represents a data item
 type GraphVertex struct {
 	ID          int32
-	Weight      int64           // Access frequency
-	CurrentPart int32           // Current partition (cluster)
-	Edges       map[int32]int64 // Adjacent vertices -> edge weight
+	Weight      int64
+	CurrentPart int32
+	Edges       map[int32]int64
 }
 
-// GraphEdge represents a transaction between two items
 type GraphEdge struct {
 	From   int32
 	To     int32
-	Weight int64 // Number of transactions between these items
+	Weight int64
 }
 
-// NewSimpleGraph creates a new simple graph
 func NewSimpleGraph(numPartitions int32, totalItems int32) *SimpleGraph {
 	return &SimpleGraph{
 		Vertices:       make(map[int32]*GraphVertex),

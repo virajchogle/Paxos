@@ -1,86 +1,36 @@
 #!/bin/bash
 set -e
 
-echo "Starting all 9 nodes in 3 clusters (separate windows)..."
 mkdir -p logs
 
-# Initial balance: 10 for tests (default), set INITIAL_BALANCE=100000 for benchmarks
-# Example: INITIAL_BALANCE=100000 ./scripts/start_nodes.sh
-if [ -z "$INITIAL_BALANCE" ]; then
-    export INITIAL_BALANCE=10
-fi
-echo "Using INITIAL_BALANCE=$INITIAL_BALANCE"
+INITIAL_BALANCE=${INITIAL_BALANCE:-10}
+echo "Starting 9 nodes (3 clusters) with INITIAL_BALANCE=$INITIAL_BALANCE"
 
-# Determine which binary to use
-if [[ -f "bin/node.exe" ]]; then
-    NODE_BIN="./bin/node.exe"
-elif [[ -f "bin/node" ]]; then
-    NODE_BIN="./bin/node"
-else
-    echo "ERROR: No node binary found in bin/"
-    echo "Please run: ./scripts/build.sh"
-    exit 1
-fi
+NODE_BIN="./bin/node"
+[[ -f "bin/node.exe" ]] && NODE_BIN="./bin/node.exe"
+[[ ! -f "$NODE_BIN" ]] && echo "Error: No node binary. Run ./scripts/build.sh" && exit 1
 
-echo "Using binary: $NODE_BIN"
-
-# Stop any existing nodes
-echo "Stopping any existing nodes..."
-if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-    # Windows - use taskkill
-    taskkill //F //IM node.exe 2>/dev/null || true
-    taskkill //F //IM node 2>/dev/null || true
-else
-    # Linux/Mac - use pkill
-    pkill -f "bin/node" || true
-fi
+pkill -f "bin/node" 2>/dev/null || true
 sleep 1
 
-# Get the current directory
 CURRENT_DIR=$(pwd)
 
-# Convert to Windows path if needed
-if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-    # Convert Git Bash path to Windows path
-    WINDOWS_DIR=$(cygpath -w "$CURRENT_DIR" 2>/dev/null || echo "$CURRENT_DIR")
-else
-    WINDOWS_DIR="$CURRENT_DIR"
-fi
-
-# Start each node in a separate terminal window
-# Cluster 1: nodes 1-3, Cluster 2: nodes 4-6, Cluster 3: nodes 7-9
 for i in {1..9}; do
-    echo "Starting node $i in new window..."
-    
-    # For Git Bash on Windows or WSL
-    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WSLENV" ]]; then
-        # Windows environment - use mintty (Git Bash terminal)
-        mintty -t "Paxos Node $i" -h always /bin/bash -c "cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS: open Terminal window that closes when process exits
+        osascript -e "tell application \"Terminal\" to do script \"cd '$CURRENT_DIR' && INITIAL_BALANCE=$INITIAL_BALANCE $NODE_BIN -id $i -config config/nodes.yaml; exit\"" &
+    elif command -v gnome-terminal &>/dev/null; then
+        gnome-terminal -- bash -c "cd '$CURRENT_DIR' && INITIAL_BALANCE=$INITIAL_BALANCE $NODE_BIN --id=$i --config=config/nodes.yaml" &
     else
-        # macOS - use Terminal.app
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            osascript -e "tell application \"Terminal\" to do script \"cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN -id $i -config config/nodes.yaml\"" &
-        # Linux - use gnome-terminal or xterm
-        elif command -v gnome-terminal &> /dev/null; then
-            gnome-terminal -- bash -c "cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
-        elif command -v xterm &> /dev/null; then
-            xterm -T "Paxos Node $i" -e bash -c "cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
-        else
-            echo "Warning: No terminal emulator found. Running in background..."
-            INITIAL_BALANCE=$INITIAL_BALANCE $NODE_BIN --id=$i --config=config/nodes.yaml > logs/node${i}.log 2>&1 &
-        fi
+        INITIAL_BALANCE=$INITIAL_BALANCE $NODE_BIN --id=$i --config=config/nodes.yaml > logs/node${i}.log 2>&1 &
     fi
-    
-    sleep 0.5
+    sleep 0.3
 done
 
 echo ""
-echo "✅ All 9 nodes started in separate windows!"
-echo "   - Cluster 1: nodes 1-3 (data items 1-3000)"
-echo "   - Cluster 2: nodes 4-6 (data items 3001-6000)"
-echo "   - Cluster 3: nodes 7-9 (data items 6001-9000)"
-echo "   - Each node runs in its own window"
-echo "   - Logs are also saved to logs/nodeX.log"
-echo "   - Close windows or press Ctrl+C in each to stop"
+echo "All 9 nodes started in separate windows!"
+echo "  Cluster 1: nodes 1-3 (items 1-3000)"
+echo "  Cluster 2: nodes 4-6 (items 3001-6000)"  
+echo "  Cluster 3: nodes 7-9 (items 6001-9000)"
 echo ""
-echo "To stop all nodes: ./scripts/stop_all.sh"
+echo "Stop: ./scripts/stop_all.sh"
