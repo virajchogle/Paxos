@@ -389,7 +389,7 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 		wg.Add(1)
 		go func(peerID int32, c pb.PaxosNodeClient) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
 			resp, err := c.Accept(ctx, acceptReq)
 			if err == nil && resp.Success {
@@ -436,7 +436,7 @@ func (n *Node) runPipelinedConsensus(seq int32, ballot *types.Ballot, req *pb.Tr
 	}
 	for pid, cli := range peers {
 		go func(peerID int32, c pb.PaxosNodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
 			_, _ = c.Commit(ctx, commitReq)
 		}(pid, cli)
@@ -763,6 +763,13 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 
 	log.Printf("Node %d: 🔍 commitAndExecute seq=%d: entry_exists=%v, lastExecuted=%d", n.id, seq, ok, lastExec)
 
+	// ✅ CRITICAL FIX: If already executed, return immediately to prevent execution storm
+	if seq <= lastExec {
+		n.logMu.Unlock()
+		log.Printf("Node %d: ✓ Seq %d already executed (lastExecuted=%d), skipping commitAndExecute", n.id, seq, lastExec)
+		return pb.ResultType_SUCCESS
+	}
+
 	if !ok {
 		// We received a COMMIT for a sequence we don't have in our log
 		n.logMu.Unlock()
@@ -783,6 +790,43 @@ func (n *Node) commitAndExecute(seq int32) pb.ResultType {
 
 	// Sequential execution: Execute all committed entries from lastExecuted+1 up to seq
 	// This ensures linearizability by maintaining sequential order
+
+	// WAIT for gaps to be filled (for pipelined 2PC)
+	// Retry until we can execute this sequence
+	maxRetries := 100
+	for retry := 0; retry < maxRetries; retry++ {
+		n.logMu.RLock()
+		currentLastExec := n.lastExecuted
+		n.logMu.RUnlock()
+
+		// Check if there's a gap between lastExecuted and seq
+		hasGap := false
+		for checkSeq := currentLastExec + 1; checkSeq < seq; checkSeq++ {
+			n.logMu.RLock()
+			_, exists := n.log[checkSeq]
+			n.logMu.RUnlock()
+			if !exists {
+				hasGap = true
+				break
+			}
+		}
+
+		if !hasGap || seq == currentLastExec+1 {
+			// No gap, proceed with execution
+			break
+		}
+
+		// Gap exists, wait a bit for prior sequences to commit
+		if retry < maxRetries-1 {
+			log.Printf("Node %d: ⏳ Waiting for seq %d (lastExec=%d, retry %d/%d)", n.id, seq, currentLastExec, retry+1, maxRetries)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	n.logMu.RLock()
+	lastExec = n.lastExecuted
+	n.logMu.RUnlock()
+
 	log.Printf("Node %d: ▶️  Executing committed entries from %d to %d", n.id, lastExec+1, seq)
 
 	finalResult := pb.ResultType_FAILED // ← CRITICAL FIX: Default to FAILED, not SUCCESS!

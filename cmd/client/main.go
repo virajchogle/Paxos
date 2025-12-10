@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -327,11 +328,22 @@ func (m *ClientManager) processNextSet() {
 
 	fmt.Printf("Processing %d commands...\n\n", len(set.Commands))
 
-	// Process commands sequentially
+	// Process commands with configurable parallelism
+	// Transactions can be parallel, but fail/recover/balance must be sequential
+	const PARALLEL_TRANSACTIONS = 5 // Number of concurrent transactions (reduced from 10 to prevent overload)
+
 	successCount := 0
+	pendingTxns := []utils.Command{}
+
 	for i, cmd := range set.Commands {
 		switch cmd.Type {
 		case "fail":
+			// Before fail, flush any pending parallel transactions
+			if len(pendingTxns) > 0 {
+				successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
+				pendingTxns = nil
+			}
+
 			// F(ni) - Fail node
 			fmt.Printf("💥 [%d/%d] F(n%d) - Failing node %d...\n", i+1, len(set.Commands), cmd.NodeID, cmd.NodeID)
 			if err := m.setNodeActive(cmd.NodeID, false); err != nil {
@@ -342,6 +354,12 @@ func (m *ClientManager) processNextSet() {
 			time.Sleep(500 * time.Millisecond) // Give time for failure to propagate
 
 		case "recover":
+			// Before recover, flush any pending parallel transactions
+			if len(pendingTxns) > 0 {
+				successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
+				pendingTxns = nil
+			}
+
 			// R(ni) - Recover node
 			fmt.Printf("🔄 [%d/%d] R(n%d) - Recovering node %d...\n", i+1, len(set.Commands), cmd.NodeID, cmd.NodeID)
 			if err := m.setNodeActive(cmd.NodeID, true); err != nil {
@@ -352,64 +370,25 @@ func (m *ClientManager) processNextSet() {
 			time.Sleep(1 * time.Second) // Give time for recovery
 
 		case "balance":
+			// Before balance query, flush any pending parallel transactions
+			if len(pendingTxns) > 0 {
+				successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
+				pendingTxns = nil
+			}
+
 			// Balance query (read-only)
 			fmt.Printf("📖 [%d/%d] Balance query for item %d...\n", i+1, len(set.Commands), cmd.Transaction.Sender)
 			m.queryBalance(fmt.Sprintf("%d", cmd.Transaction.Sender))
 
 		case "transaction":
-			// Regular transaction
-			txn := cmd.Transaction
-
-			// If no quorum, immediately queue without sending
-			if !hasQuorum {
-				fmt.Printf("⏸️  [%d/%d] %d → %d: %d units - QUEUED (no quorum)\n",
-					i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount)
-				m.mu.Lock()
-				m.pendingQueue = append(m.pendingQueue, cmd)
-				m.mu.Unlock()
-			} else {
-				// Have quorum, attempt to send
-				senderCluster := m.getClusterForDataItem(txn.Sender)
-				receiverCluster := m.getClusterForDataItem(txn.Receiver)
-
-				err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
-				if err == nil {
-					if senderCluster == receiverCluster {
-						fmt.Printf("✅ [%d/%d] %d → %d: %d units (Cluster %d)\n",
-							i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster)
-					} else {
-						fmt.Printf("✅ [%d/%d] %d → %d: %d units (C%d→C%d cross-shard)\n",
-							i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster)
-					}
-					successCount++
-				} else {
-					// Check if it's a business logic failure
-					errMsg := err.Error()
-					if strings.Contains(errMsg, "transaction failed:") || strings.Contains(errMsg, "Insufficient balance") {
-						// Business logic error - mark as FAILED (don't queue)
-						if senderCluster == receiverCluster {
-							fmt.Printf("❌ [%d/%d] %d → %d: %d units (Cluster %d) - FAILED: %s\n",
-								i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster, errMsg)
-						} else {
-							fmt.Printf("❌ [%d/%d] %d → %d: %d units (C%d→C%d cross-shard) - FAILED: %s\n",
-								i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster, errMsg)
-						}
-					} else {
-						// Network/timeout error - queue for retry
-						fmt.Printf("⏸️  [%d/%d] %d → %d: %d units - QUEUED (%s)\n",
-							i+1, len(set.Commands), txn.Sender, txn.Receiver, txn.Amount, errMsg)
-						m.mu.Lock()
-						m.pendingQueue = append(m.pendingQueue, cmd)
-						m.mu.Unlock()
-					}
-				}
-			}
+			// Accumulate transactions for parallel execution
+			pendingTxns = append(pendingTxns, cmd)
 		}
+	}
 
-		// Minimal delay between commands
-		if i < len(set.Commands)-1 {
-			time.Sleep(1 * time.Millisecond)
-		}
+	// Flush any remaining pending transactions
+	if len(pendingTxns) > 0 {
+		successCount += m.sendParallel(pendingTxns, PARALLEL_TRANSACTIONS, hasQuorum)
 	}
 
 	m.mu.Lock()
@@ -719,8 +698,8 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 		return fmt.Errorf("no available nodes in cluster for data item %d", sender)
 	}
 
-	// Create context with timeout (optimized for high throughput)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // Was 5s - now 500ms
+	// Create context with timeout (balanced for throughput and reliability)
+	ctx, cancel := context.WithTimeout(context.Background(), 2000*time.Millisecond) // 2 seconds for transaction completion under heavy load
 	defer cancel()
 
 	resp, err := nodeClient.SubmitTransaction(ctx, req)
@@ -739,7 +718,7 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 				continue
 			}
 
-			ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond) // Was 3s - now 300ms
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 2000*time.Millisecond) // 2 seconds for retries
 			resp, err = nc.SubmitTransaction(ctx2, req)
 			cancel2()
 
@@ -783,6 +762,119 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 // sendTransaction is kept for backward compatibility and single transaction sends
 func (m *ClientManager) sendTransaction(sender, receiver int32, amount int32) error {
 	return m.sendTransactionWithRetry(sender, receiver, amount)
+}
+
+// sendParallel sends multiple transactions concurrently with limited parallelism
+func (m *ClientManager) sendParallel(cmds []utils.Command, concurrency int, hasQuorum bool) int {
+	if len(cmds) == 0 {
+		return 0
+	}
+
+	type TxnResult struct {
+		Index       int
+		Cmd         utils.Command
+		Success     bool
+		Error       error
+		ShouldQueue bool
+	}
+
+	results := make(chan TxnResult, len(cmds))
+	sem := make(chan struct{}, concurrency) // Limit concurrent transactions
+	var wg sync.WaitGroup
+
+	fmt.Printf("🚀 Sending %d transactions in parallel (max %d concurrent)...\n", len(cmds), concurrency)
+
+	for i, cmd := range cmds {
+		if cmd.Type != "transaction" {
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{} // Acquire slot
+
+		go func(idx int, command utils.Command) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release slot
+
+			txn := command.Transaction
+
+			// If no quorum, queue immediately
+			if !hasQuorum {
+				results <- TxnResult{
+					Index:       idx,
+					Cmd:         command,
+					Success:     false,
+					ShouldQueue: true,
+				}
+				return
+			}
+
+			// Send transaction
+			err := m.sendTransactionWithRetry(txn.Sender, txn.Receiver, txn.Amount)
+
+			shouldQueue := false
+			if err != nil {
+				// Check if it's a business logic failure vs system error
+				errMsg := err.Error()
+				if !strings.Contains(errMsg, "transaction failed:") && !strings.Contains(errMsg, "Insufficient balance") {
+					// Network/system error - should queue
+					shouldQueue = true
+				}
+			}
+
+			results <- TxnResult{
+				Index:       idx,
+				Cmd:         command,
+				Success:     err == nil,
+				Error:       err,
+				ShouldQueue: shouldQueue,
+			}
+		}(i, cmd)
+	}
+
+	wg.Wait()
+	close(results)
+
+	// Collect and display results
+	successCount := 0
+	resultSlice := make([]TxnResult, 0, len(cmds))
+	for result := range results {
+		resultSlice = append(resultSlice, result)
+	}
+
+	// Sort by index to maintain order in output
+	sort.Slice(resultSlice, func(i, j int) bool {
+		return resultSlice[i].Index < resultSlice[j].Index
+	})
+
+	for _, result := range resultSlice {
+		txn := result.Cmd.Transaction
+		senderCluster := m.getClusterForDataItem(txn.Sender)
+		receiverCluster := m.getClusterForDataItem(txn.Receiver)
+
+		if result.Success {
+			if senderCluster == receiverCluster {
+				fmt.Printf("✅ [%d/%d] %d → %d: %d units (Cluster %d)\n",
+					result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, senderCluster)
+			} else {
+				fmt.Printf("✅ [%d/%d] %d → %d: %d units (C%d→C%d cross-shard)\n",
+					result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster)
+			}
+			successCount++
+		} else if result.ShouldQueue {
+			fmt.Printf("⏸️  [%d/%d] %d → %d: %d units - QUEUED (%v)\n",
+				result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, result.Error)
+			m.mu.Lock()
+			m.pendingQueue = append(m.pendingQueue, result.Cmd)
+			m.mu.Unlock()
+		} else {
+			// Business logic failure
+			fmt.Printf("❌ [%d/%d] %d → %d: %d units - FAILED: %v\n",
+				result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, result.Error)
+		}
+	}
+
+	return successCount
 }
 
 func (m *ClientManager) sendSingleTransaction(senderStr, receiverStr, amountStr string) {

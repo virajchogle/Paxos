@@ -264,7 +264,13 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 
 	// Get the sequence number from PREPARE phase
 	n.balanceMu.RLock()
-	prepareSeq := n.twoPCState.transactions[txnID].PrepareSeq
+	txState, exists := n.twoPCState.transactions[txnID]
+	if !exists || txState == nil {
+		n.balanceMu.RUnlock()
+		log.Printf("Node %d: 2PC[%s]: ❌ CRITICAL ERROR - transaction state missing in COMMIT phase", n.id, txnID)
+		return n.coordinatorAbort(txnID, clientID, timestamp, receiverClient, "transaction state lost")
+	}
+	prepareSeq := txState.PrepareSeq
 	n.balanceMu.RUnlock()
 
 	// Step 2a: Run Paxos to replicate COMMIT entry with SAME sequence number
@@ -337,10 +343,10 @@ func (n *Node) coordinatorAbort(txnID, clientID string, timestamp int64, partici
 
 	// Run Paxos to replicate ABORT entry (marker: 'A')
 	n.balanceMu.RLock()
-	txState := n.twoPCState.transactions[txnID]
+	txState, exists := n.twoPCState.transactions[txnID]
 	n.balanceMu.RUnlock()
 
-	if txState != nil {
+	if exists && txState != nil {
 		abortReq := &pb.TransactionRequest{
 			ClientId:    clientID,
 			Timestamp:   timestamp,
@@ -895,31 +901,45 @@ func (n *Node) processAsLeaderWithPhaseAndSeq(req *pb.TransactionRequest, phase 
 		}(pid, client)
 	}
 
-	// Execute the transaction
-	result := n.commitAndExecute(seq)
-
-	// Build reply
+	// Execute ONLY in PREPARE phase, not in COMMIT/ABORT
+	var result pb.ResultType
 	var reply *pb.TransactionReply
-	if result == pb.ResultType_SUCCESS {
-		reply = &pb.TransactionReply{
-			Success: true,
-			Message: fmt.Sprintf("Transaction committed (seq=%d, phase='%s')", seq, phase),
-			Ballot:  ballot.ToProto(),
-			Result:  result,
-		}
-	} else if result == pb.ResultType_INSUFFICIENT_BALANCE {
-		reply = &pb.TransactionReply{
-			Success: false,
-			Message: "Insufficient balance",
-			Ballot:  ballot.ToProto(),
-			Result:  result,
+
+	if phase == "P" {
+		// PREPARE: Execute the transaction
+		result = n.commitAndExecute(seq)
+
+		// Build reply based on execution result
+		if result == pb.ResultType_SUCCESS {
+			reply = &pb.TransactionReply{
+				Success: true,
+				Message: fmt.Sprintf("Transaction committed (seq=%d, phase='%s')", seq, phase),
+				Ballot:  ballot.ToProto(),
+				Result:  result,
+			}
+		} else if result == pb.ResultType_INSUFFICIENT_BALANCE {
+			reply = &pb.TransactionReply{
+				Success: false,
+				Message: "Insufficient balance",
+				Ballot:  ballot.ToProto(),
+				Result:  result,
+			}
+		} else {
+			reply = &pb.TransactionReply{
+				Success: false,
+				Message: "Transaction failed",
+				Ballot:  ballot.ToProto(),
+				Result:  result,
+			}
 		}
 	} else {
+		// COMMIT or ABORT: No execution, just confirmation
+		log.Printf("Node %d: 2PC phase '%s' complete for seq=%d (no execution)", n.id, phase, seq)
 		reply = &pb.TransactionReply{
-			Success: false,
-			Message: "Transaction failed",
+			Success: true,
+			Message: fmt.Sprintf("Transaction phase '%s' complete (seq=%d)", phase, seq),
 			Ballot:  ballot.ToProto(),
-			Result:  result,
+			Result:  pb.ResultType_SUCCESS,
 		}
 	}
 
