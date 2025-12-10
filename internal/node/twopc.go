@@ -432,13 +432,17 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 	log.Printf("Node %d: 2PC[%s]: Received PREPARE request for item %d (PARTICIPANT)", n.id, txnID, tx.Receiver)
 
 	// Wait for leader election if needed
+	// IMPORTANT: Only expected leaders should start elections
 	n.paxosMu.RLock()
 	hasLeader := n.isLeader || n.leaderID > 0
 	n.paxosMu.RUnlock()
 
-	if !hasLeader {
+	if !hasLeader && n.isExpectedLeader() {
 		go n.StartLeaderElection()
 		time.Sleep(200 * time.Millisecond) // Brief wait for election
+	} else if !hasLeader {
+		// Not expected leader - wait for election to happen
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	n.balanceMu.Lock()

@@ -20,6 +20,7 @@ func main() {
 	crossShardPct := flag.Int("cross-shard", -1, "Percentage of cross-shard transactions (0-100)")
 	readOnlyPct := flag.Int("read-only", -1, "Percentage of read-only queries (0-100)")
 	distribution := flag.String("distribution", "", "Data distribution (uniform, zipf, hotspot)")
+	skewness := flag.Float64("skewness", -1, "Zipf skewness parameter (0-1, higher=more skewed)")
 	warmup := flag.Int("warmup", -1, "Warmup duration in seconds")
 	reportInterval := flag.Int("report", -1, "Report progress every N seconds")
 	detailedStats := flag.Bool("detailed", false, "Include detailed percentile statistics")
@@ -70,6 +71,13 @@ func main() {
 	}
 	if *distribution != "" {
 		config.DataDistribution = *distribution
+	}
+	if *skewness >= 0 {
+		config.ZipfS = *skewness
+		// Auto-set distribution to zipf if skewness is specified but distribution isn't
+		if *distribution == "" {
+			config.DataDistribution = "zipf"
+		}
 	}
 	if *warmup >= 0 {
 		config.WarmupSeconds = *warmup
@@ -144,6 +152,8 @@ func printUsage() {
 	fmt.Println("  -cross-shard N           Percentage of cross-shard transactions (0-100)")
 	fmt.Println("  -read-only N             Percentage of read-only queries (0-100)")
 	fmt.Println("  -distribution TYPE       Data distribution (uniform/zipf/hotspot)")
+	fmt.Println("  -skewness N              Zipf skewness parameter (0-1, default: 1.0)")
+	fmt.Println("                           Higher values create more skewed access patterns")
 	fmt.Println()
 	fmt.Println("Output Options:")
 	fmt.Println("  -warmup N                Warmup duration in seconds")
@@ -170,4 +180,3 @@ func printUsage() {
 	fmt.Println("  ./benchmark -preset stress -report 10 -detailed -csv")
 	fmt.Println()
 }
-

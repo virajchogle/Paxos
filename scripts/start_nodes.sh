@@ -4,6 +4,13 @@ set -e
 echo "Starting all 9 nodes in 3 clusters (separate windows)..."
 mkdir -p logs
 
+# Initial balance: 10 for tests (default), set INITIAL_BALANCE=100000 for benchmarks
+# Example: INITIAL_BALANCE=100000 ./scripts/start_nodes.sh
+if [ -z "$INITIAL_BALANCE" ]; then
+    export INITIAL_BALANCE=10
+fi
+echo "Using INITIAL_BALANCE=$INITIAL_BALANCE"
+
 # Determine which binary to use
 if [[ -f "bin/node.exe" ]]; then
     NODE_BIN="./bin/node.exe"
@@ -48,19 +55,19 @@ for i in {1..9}; do
     # For Git Bash on Windows or WSL
     if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WSLENV" ]]; then
         # Windows environment - use mintty (Git Bash terminal)
-        mintty -t "Paxos Node $i" -h always /bin/bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
+        mintty -t "Paxos Node $i" -h always /bin/bash -c "cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
     else
         # macOS - use Terminal.app
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            osascript -e "tell application \"Terminal\" to do script \"cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN -id $i -config config/nodes.yaml\"" &
+            osascript -e "tell application \"Terminal\" to do script \"cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN -id $i -config config/nodes.yaml\"" &
         # Linux - use gnome-terminal or xterm
         elif command -v gnome-terminal &> /dev/null; then
-            gnome-terminal -- bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
+            gnome-terminal -- bash -c "cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
         elif command -v xterm &> /dev/null; then
-            xterm -T "Paxos Node $i" -e bash -c "cd '$CURRENT_DIR' && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
+            xterm -T "Paxos Node $i" -e bash -c "cd '$CURRENT_DIR' && export INITIAL_BALANCE=$INITIAL_BALANCE && echo '═══════════════════════════════════════' && echo '   Paxos Node $i' && echo '═══════════════════════════════════════' && echo '' && $NODE_BIN --id=$i --config=config/nodes.yaml; exec bash" &
         else
             echo "Warning: No terminal emulator found. Running in background..."
-            $NODE_BIN --id=$i --config=config/nodes.yaml > logs/node${i}.log 2>&1 &
+            INITIAL_BALANCE=$INITIAL_BALANCE $NODE_BIN --id=$i --config=config/nodes.yaml > logs/node${i}.log 2>&1 &
         fi
     fi
     

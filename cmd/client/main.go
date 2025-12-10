@@ -36,6 +36,20 @@ type ClientManager struct {
 	// Transaction history for resharding analysis
 	txnHistoryMu sync.Mutex
 	txnHistory   []TransactionRecord
+
+	// Migration tracking - maps itemID to new cluster after migration
+	migratedItems   map[int32]int32
+	migratedItemsMu sync.RWMutex
+
+	// Client-side latency tracking (per project spec)
+	latencyMu        sync.Mutex
+	latencies        []time.Duration // All transaction latencies
+	totalTxns        int64
+	successfulTxns   int64
+	failedTxns       int64
+	crossShardTxns   int64
+	intraShardTxns   int64
+	testSetStartTime time.Time
 }
 
 // TransactionRecord records a transaction for resharding analysis
@@ -86,6 +100,7 @@ func main() {
 		clusterLeaders: make(map[int32]int32),
 		config:         cfg,
 		pendingQueue:   make([]utils.Command, 0),
+		migratedItems:  make(map[int32]int32),
 	}
 
 	// Initialize cluster leaders with first node of each cluster
@@ -177,6 +192,7 @@ func (m *ClientManager) runInteractive() {
 	fmt.Println("╚══════════════════════════════════════════════╝")
 	fmt.Println("\nCommands:")
 	fmt.Println("  next           - Process next test set")
+	fmt.Println("  skip           - Skip next test set")
 	fmt.Println("  status         - Show current status")
 	fmt.Println("  leader         - Show current leader")
 	fmt.Println("  retry          - Retry queued transactions")
@@ -185,7 +201,8 @@ func (m *ClientManager) runInteractive() {
 	fmt.Println("  printbalance <id> - PrintBalance function (all nodes in cluster)")
 	fmt.Println("  printdb        - PrintDB function (all 9 nodes in parallel)")
 	fmt.Println("  printview      - PrintView function (NEW-VIEW messages)")
-	fmt.Println("  printreshard   - PrintReshard function (trigger resharding)")
+	fmt.Println("  printreshard   - PrintReshard function (analyze and show triplets)")
+	fmt.Println("  executereshard - Execute resharding (actually move data items)")
 	fmt.Println("  flush          - Flush system state (reset all nodes)")
 	fmt.Println("  performance    - Get performance metrics from all nodes")
 	fmt.Println("  help           - Show this help")
@@ -208,6 +225,8 @@ func (m *ClientManager) runInteractive() {
 		switch parts[0] {
 		case "next":
 			m.processNextSet()
+		case "skip":
+			m.skipNextSet()
 		case "status":
 			m.showStatus()
 		case "leader":
@@ -239,6 +258,8 @@ func (m *ClientManager) runInteractive() {
 			m.printViewAllNodes()
 		case "printreshard":
 			m.printReshard()
+		case "executereshard":
+			m.executeReshard()
 		case "flush":
 			m.flushAllNodes()
 		case "performance", "perf":
@@ -254,6 +275,26 @@ func (m *ClientManager) runInteractive() {
 	}
 }
 
+// skipNextSet skips the next test set without processing (per project spec)
+func (m *ClientManager) skipNextSet() {
+	if m.currentSet >= len(m.testSets) {
+		fmt.Println("No more test sets to skip")
+		return
+	}
+
+	skippedSet := m.testSets[m.currentSet]
+	m.currentSet++
+
+	fmt.Printf("⏭️  Skipped Test Set %d (%d commands)\n", skippedSet.SetNumber, len(skippedSet.Commands))
+
+	if m.currentSet < len(m.testSets) {
+		nextSet := m.testSets[m.currentSet]
+		fmt.Printf("   Next: Test Set %d (%d commands)\n", nextSet.SetNumber, len(nextSet.Commands))
+	} else {
+		fmt.Println("   No more test sets remaining")
+	}
+}
+
 func (m *ClientManager) processNextSet() {
 	if m.currentSet >= len(m.testSets) {
 		fmt.Println("No more test sets")
@@ -265,6 +306,9 @@ func (m *ClientManager) processNextSet() {
 	m.txnHistoryMu.Lock()
 	m.txnHistory = nil
 	m.txnHistoryMu.Unlock()
+
+	// Reset client-side metrics for this test set
+	m.resetClientMetrics()
 
 	// BOOTSTRAP: Treat every test set as a fresh start
 	// This prevents split-brain issues and ensures clean leader elections
@@ -608,6 +652,15 @@ func (m *ClientManager) discoverNewLeader() {
 
 // getClusterForDataItem determines which cluster owns a data item
 func (m *ClientManager) getClusterForDataItem(dataItemID int32) int32 {
+	// Check if item has been migrated
+	m.migratedItemsMu.RLock()
+	if newCluster, migrated := m.migratedItems[dataItemID]; migrated {
+		m.migratedItemsMu.RUnlock()
+		return newCluster
+	}
+	m.migratedItemsMu.RUnlock()
+
+	// Use default range-based partitioning
 	for clusterID, clusterCfg := range m.config.Clusters {
 		if dataItemID >= int32(clusterCfg.ShardStart) && dataItemID <= int32(clusterCfg.ShardEnd) {
 			return int32(clusterID)
@@ -669,6 +722,9 @@ func (m *ClientManager) getTargetNodeForTransaction(sender, receiver int32) (int
 
 // sendTransactionWithRetry sends transaction with retry logic
 func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount int32) error {
+	// CLIENT-SIDE LATENCY: Start timing (per project spec)
+	txnStart := time.Now()
+
 	// Generate unique client ID based on sender data item
 	clientID := fmt.Sprintf("client_%d", sender)
 
@@ -687,11 +743,6 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 
 	// Determine target node based on cluster-aware routing
 	targetNode, isCrossShard := m.getTargetNodeForTransaction(sender, receiver)
-
-	if isCrossShard {
-		// Cross-shard transaction - will be handled by 2PC on server side
-		log.Printf("🌐 Cross-shard transaction detected (%d→%d) - using 2PC", sender, receiver)
-	}
 
 	nodeClient, exists := m.nodeClients[targetNode]
 	if !exists || nodeClient == nil {
@@ -769,6 +820,10 @@ func (m *ClientManager) sendTransactionWithRetry(sender, receiver int32, amount 
 	// (even failed ones represent co-access patterns that would benefit from resharding)
 	m.recordTransaction(sender, receiver, isCrossShard)
 
+	// CLIENT-SIDE LATENCY: Record timing (per project spec)
+	latency := time.Since(txnStart)
+	m.recordLatency(latency, resp != nil && resp.Success, isCrossShard)
+
 	// Check if transaction actually succeeded
 	if resp == nil {
 		return fmt.Errorf("no response received")
@@ -796,6 +851,46 @@ func (m *ClientManager) recordTransaction(sender, receiver int32, isCross bool) 
 	if len(m.txnHistory) > 100000 {
 		m.txnHistory = m.txnHistory[len(m.txnHistory)-100000:]
 	}
+}
+
+// recordLatency records client-side latency (per project spec)
+func (m *ClientManager) recordLatency(latency time.Duration, success bool, isCrossShard bool) {
+	m.latencyMu.Lock()
+	defer m.latencyMu.Unlock()
+
+	m.latencies = append(m.latencies, latency)
+	m.totalTxns++
+
+	if success {
+		m.successfulTxns++
+	} else {
+		m.failedTxns++
+	}
+
+	if isCrossShard {
+		m.crossShardTxns++
+	} else {
+		m.intraShardTxns++
+	}
+
+	// Keep latencies bounded (last 100K)
+	if len(m.latencies) > 100000 {
+		m.latencies = m.latencies[len(m.latencies)-100000:]
+	}
+}
+
+// resetClientMetrics resets client-side metrics for a new test set
+func (m *ClientManager) resetClientMetrics() {
+	m.latencyMu.Lock()
+	defer m.latencyMu.Unlock()
+
+	m.latencies = nil
+	m.totalTxns = 0
+	m.successfulTxns = 0
+	m.failedTxns = 0
+	m.crossShardTxns = 0
+	m.intraShardTxns = 0
+	m.testSetStartTime = time.Now()
 }
 
 // sendTransaction is kept for backward compatibility and single transaction sends
@@ -1080,8 +1175,12 @@ func (m *ClientManager) showHelp() {
 	fmt.Println("    Check node logs for detailed output")
 	fmt.Println()
 	fmt.Println("  printreshard")
-	fmt.Println("    PrintReshard() - Trigger resharding analysis")
+	fmt.Println("    PrintReshard() - Analyze and show resharding triplets")
 	fmt.Println("    Outputs triplets: (item_id, c_from, c_to)")
+	fmt.Println()
+	fmt.Println("  executereshard")
+	fmt.Println("    Execute resharding - actually move data items between clusters")
+	fmt.Println("    Run after printreshard to perform the migration")
 	fmt.Println()
 	fmt.Println("  flush")
 	fmt.Println("    FLUSH system state (required between test sets)")
@@ -1110,10 +1209,6 @@ func (m *ClientManager) printBalanceAllNodes(dataItemIDStr string) {
 	// Determine which cluster owns this item
 	cluster := m.config.GetClusterForDataItem(dataItemID)
 	clusterNodes := m.config.GetNodesInCluster(int(cluster))
-
-	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  PrintBalance(%d) - Cluster %d Nodes                  ║\n", dataItemID, cluster)
-	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
 
 	// Query all nodes in parallel
 	type nodeBalance struct {
@@ -1162,7 +1257,7 @@ func (m *ClientManager) printBalanceAllNodes(dataItemIDStr string) {
 		}
 	}
 
-	// Print in format: n4 : 8, n5 : 8, n6 : 10
+	// Print in exact format per project spec: n4 : 8, n5 : 8, n6 : 10
 	output := ""
 	for _, nodeID := range clusterNodes {
 		if balance, ok := results[int32(nodeID)]; ok {
@@ -1174,18 +1269,17 @@ func (m *ClientManager) printBalanceAllNodes(dataItemIDStr string) {
 			if output != "" {
 				output += ", "
 			}
-			output += fmt.Sprintf("n%d : ERROR(%v)", nodeID, err)
+			output += fmt.Sprintf("n%d : ERROR", nodeID)
+			_ = err // Log error silently
 		}
 	}
 
-	fmt.Printf("Output: %s\n\n", output)
+	fmt.Printf("%s\n", output)
 }
 
 // printDBAllNodes implements PrintDB - query all 9 nodes in parallel
 func (m *ClientManager) printDBAllNodes() {
-	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  PrintDB - All 9 Nodes                                ║\n")
-	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+	fmt.Println("\nPrintDB - Modified balances on all nodes:")
 
 	type nodeDB struct {
 		nodeID    int32
@@ -1226,20 +1320,40 @@ func (m *ClientManager) printDBAllNodes() {
 		}(nodeID)
 	}
 
-	// Collect and display results
+	// Collect and sort results by node ID
+	results := make([]nodeDB, 0, 9)
 	for i := 0; i < 9; i++ {
-		result := <-resultChan
-		if result.err != nil {
-			fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
-		} else {
-			fmt.Printf("\n--- Node %d (Cluster %d) ---\n", result.nodeID, result.clusterID)
-			if len(result.balances) == 0 {
-				fmt.Println("  (No modified balances)")
+		results = append(results, <-resultChan)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].nodeID < results[j].nodeID
+	})
+
+	// Display results grouped by cluster
+	for cluster := 1; cluster <= 3; cluster++ {
+		fmt.Printf("\n--- Cluster %d ---\n", cluster)
+		startNode := int32((cluster-1)*3 + 1)
+		endNode := int32(cluster * 3)
+
+		for _, result := range results {
+			if result.nodeID < startNode || result.nodeID > endNode {
+				continue
+			}
+			if result.err != nil {
+				fmt.Printf("  Node %d: ❌ Error: %v\n", result.nodeID, result.err)
 			} else {
-				for _, entry := range result.balances {
-					if entry.Balance != 10 { // Only show modified items
-						fmt.Printf("  Item %d: %d\n", entry.DataItem, entry.Balance)
+				if len(result.balances) == 0 {
+					fmt.Printf("  Node %d: (No modified items)\n", result.nodeID)
+				} else {
+					fmt.Printf("  Node %d: ", result.nodeID)
+					// Print all modified items on one line
+					for i, entry := range result.balances {
+						if i > 0 {
+							fmt.Printf(", ")
+						}
+						fmt.Printf("%d=%d", entry.DataItem, entry.Balance)
 					}
+					fmt.Println()
 				}
 			}
 		}
@@ -1282,17 +1396,33 @@ func (m *ClientManager) printViewAllNodes() {
 		}(nodeID)
 	}
 
-	// Collect results
+	// Collect and sort results by node ID
+	results := make([]nodeView, 0, 9)
 	for i := 0; i < 9; i++ {
-		result := <-resultChan
-		if result.err != nil {
-			fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
-		} else if result.reply != nil {
-			fmt.Printf("Node %d: %s\n", result.nodeID, result.reply.Message)
+		results = append(results, <-resultChan)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].nodeID < results[j].nodeID
+	})
+
+	// Display results grouped by cluster
+	for cluster := 1; cluster <= 3; cluster++ {
+		fmt.Printf("\n--- Cluster %d ---\n", cluster)
+		startNode := int32((cluster-1)*3 + 1)
+		endNode := int32(cluster * 3)
+
+		for _, result := range results {
+			if result.nodeID < startNode || result.nodeID > endNode {
+				continue
+			}
+			if result.err != nil {
+				fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
+			} else if result.reply != nil {
+				// Print the full message which contains NEW-VIEW details
+				fmt.Printf("%s", result.reply.Message)
+			}
 		}
 	}
-
-	fmt.Println("\n(See node logs for detailed NEW-VIEW message contents)")
 	fmt.Println()
 }
 
@@ -1411,6 +1541,243 @@ func (m *ClientManager) printReshard() {
 	fmt.Printf("═══════════════════════════════════════════════════════════════════\n\n")
 }
 
+// executeReshard performs actual data migration based on resharding analysis
+// This implements the "(2) effectively carry out the resharding process" from the spec
+func (m *ClientManager) executeReshard() {
+	fmt.Println("\nExecuting Resharding (Data Migration)...")
+	fmt.Println("─────────────────────────────────────────────────")
+
+	// First, run the analysis to get the moves
+	m.txnHistoryMu.Lock()
+	txnCount := len(m.txnHistory)
+	history := make([]TransactionRecord, txnCount)
+	copy(history, m.txnHistory)
+	m.txnHistoryMu.Unlock()
+
+	if txnCount == 0 {
+		fmt.Println("❌ No transaction history - run transactions first, then printreshard")
+		return
+	}
+
+	// Build graph and run partitioning (same as printReshard)
+	numClusters := int32(len(m.config.Clusters))
+	graph := redistribution.NewSimpleGraph(numClusters, 0)
+
+	edgeWeights := make(map[string]int64)
+	itemCounts := make(map[int32]int64)
+
+	for _, txn := range history {
+		itemCounts[txn.Sender]++
+		itemCounts[txn.Receiver]++
+		var key string
+		if txn.Sender < txn.Receiver {
+			key = fmt.Sprintf("%d-%d", txn.Sender, txn.Receiver)
+		} else {
+			key = fmt.Sprintf("%d-%d", txn.Receiver, txn.Sender)
+		}
+		edgeWeights[key]++
+	}
+
+	for itemID, count := range itemCounts {
+		partition := m.getClusterForDataItem(itemID)
+		graph.AddVertex(itemID, count, partition)
+	}
+
+	for key, weight := range edgeWeights {
+		var from, to int32
+		fmt.Sscanf(key, "%d-%d", &from, &to)
+		graph.AddEdge(from, to, weight)
+	}
+
+	config := redistribution.DefaultSimplePartitionConfig()
+	config.MinGain = 1
+	config.Verbose = false
+
+	partitioner := redistribution.NewSimplePartitioner(graph, config)
+	result, err := partitioner.Partition()
+	if err != nil {
+		fmt.Printf("❌ Partitioning failed: %v\n", err)
+		return
+	}
+
+	if len(result.Moves) == 0 {
+		fmt.Println("✅ No items need to be moved - current partitioning is optimal!")
+		return
+	}
+
+	fmt.Printf("📦 Migrating %d items...\n\n", len(result.Moves))
+
+	// Group moves by source cluster
+	movesBySource := make(map[int32][]redistribution.SimpleMove)
+	for _, move := range result.Moves {
+		movesBySource[move.FromCluster] = append(movesBySource[move.FromCluster], move)
+	}
+
+	migrationID := fmt.Sprintf("mig_%d", time.Now().UnixNano())
+	successCount := 0
+	failCount := 0
+
+	// Execute migration for each source cluster
+	for sourceCluster, moves := range movesBySource {
+		fmt.Printf("--- Migrating from Cluster %d ---\n", sourceCluster)
+
+		// Get source cluster leader
+		sourceLeader := m.config.GetLeaderNodeForCluster(int(sourceCluster))
+		sourceClient := m.nodeClients[sourceLeader]
+		if sourceClient == nil {
+			fmt.Printf("  ❌ Source leader (node %d) not available\n", sourceLeader)
+			failCount += len(moves)
+			continue
+		}
+
+		// Prepare items for migration on source
+		itemIDs := make([]int32, len(moves))
+		targetClusters := make(map[int32]int32)
+		for i, move := range moves {
+			itemIDs[i] = move.ItemID
+			targetClusters[move.ItemID] = move.ToCluster
+		}
+
+		// Step 1: Prepare on source
+		prepareReq := &pb.MigrationPrepareRequest{
+			MigrationId:    migrationID,
+			ClusterId:      sourceCluster,
+			ItemIds:        itemIDs,
+			TargetClusters: targetClusters,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		prepareResp, err := sourceClient.MigrationPrepare(ctx, prepareReq)
+		cancel()
+
+		if err != nil || !prepareResp.Success {
+			errMsg := "unknown"
+			if err != nil {
+				errMsg = err.Error()
+			} else {
+				errMsg = prepareResp.Message
+			}
+			fmt.Printf("  ❌ Prepare failed: %s\n", errMsg)
+			failCount += len(moves)
+			continue
+		}
+
+		// Step 2: Get data from source
+		getDataReq := &pb.MigrationGetDataRequest{
+			MigrationId: migrationID,
+			ItemIds:     itemIDs,
+		}
+
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		getDataResp, err := sourceClient.MigrationGetData(ctx, getDataReq)
+		cancel()
+
+		if err != nil || !getDataResp.Success {
+			fmt.Printf("  ❌ GetData failed\n")
+			failCount += len(moves)
+			continue
+		}
+
+		// Group items by target cluster
+		itemsByTarget := make(map[int32][]*pb.MigrationDataItem)
+		for _, item := range getDataResp.Items {
+			targetCluster := targetClusters[item.ItemId]
+			itemsByTarget[targetCluster] = append(itemsByTarget[targetCluster], item)
+		}
+
+		// Step 3: Send data to each target cluster
+		allTargetsOK := true
+		for targetCluster, items := range itemsByTarget {
+			targetLeader := m.config.GetLeaderNodeForCluster(int(targetCluster))
+			targetClient := m.nodeClients[targetLeader]
+			if targetClient == nil {
+				fmt.Printf("  ❌ Target leader (node %d) not available\n", targetLeader)
+				allTargetsOK = false
+				continue
+			}
+
+			setDataReq := &pb.MigrationSetDataRequest{
+				MigrationId:   migrationID,
+				SourceCluster: sourceCluster,
+				Items:         items,
+			}
+
+			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			setDataResp, err := targetClient.MigrationSetData(ctx, setDataReq)
+			cancel()
+
+			if err != nil || !setDataResp.Success {
+				fmt.Printf("  ❌ SetData to cluster %d failed\n", targetCluster)
+				allTargetsOK = false
+				continue
+			}
+
+			// Step 4: Commit on target
+			commitReq := &pb.MigrationCommitRequest{
+				MigrationId: migrationID,
+				ClusterId:   targetCluster,
+			}
+
+			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			_, err = targetClient.MigrationCommit(ctx, commitReq)
+			cancel()
+
+			if err != nil {
+				fmt.Printf("  ❌ Commit on cluster %d failed\n", targetCluster)
+				allTargetsOK = false
+			}
+		}
+
+		if !allTargetsOK {
+			// Rollback on source
+			rollbackReq := &pb.MigrationRollbackRequest{
+				MigrationId: migrationID,
+				ClusterId:   sourceCluster,
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			sourceClient.MigrationRollback(ctx, rollbackReq)
+			cancel()
+			failCount += len(moves)
+			continue
+		}
+
+		// Step 5: Commit on source (removes items)
+		commitReq := &pb.MigrationCommitRequest{
+			MigrationId: migrationID,
+			ClusterId:   sourceCluster,
+		}
+
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		_, err = sourceClient.MigrationCommit(ctx, commitReq)
+		cancel()
+
+		if err != nil {
+			fmt.Printf("  ❌ Commit on source cluster %d failed\n", sourceCluster)
+			failCount += len(moves)
+			continue
+		}
+
+		// Print successful moves and update routing
+		for _, move := range moves {
+			fmt.Printf("  ✅ (%d, c%d, c%d) - migrated\n", move.ItemID, move.FromCluster, move.ToCluster)
+			// Update client's routing for this item
+			m.migratedItemsMu.Lock()
+			if m.migratedItems == nil {
+				m.migratedItems = make(map[int32]int32)
+			}
+			m.migratedItems[move.ItemID] = move.ToCluster
+			m.migratedItemsMu.Unlock()
+			successCount++
+		}
+	}
+
+	fmt.Println("─────────────────────────────────────────────────")
+	fmt.Printf("Migration complete: %d succeeded, %d failed\n\n", successCount, failCount)
+	if successCount > 0 {
+		fmt.Println("Client routing updated - future transactions will use new locations.")
+	}
+}
+
 // flushAllNodes implements Flush - reset all node state
 func (m *ClientManager) flushAllNodes() {
 	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
@@ -1479,67 +1846,83 @@ func (m *ClientManager) flushAllNodes() {
 	}
 	m.mu.Unlock()
 
+	// Reset migration tracking (items back to original clusters)
+	m.migratedItemsMu.Lock()
+	m.migratedItems = make(map[int32]int32)
+	m.migratedItemsMu.Unlock()
+
 	fmt.Println("Waiting for nodes to stabilize...")
 	time.Sleep(100 * time.Millisecond)
 	fmt.Println()
 }
 
-// performanceAllNodes gets performance metrics from all nodes
+// performanceAllNodes gets performance metrics - CLIENT-SIDE (per project spec)
 func (m *ClientManager) performanceAllNodes() {
-	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  Performance Metrics - All Nodes                      ║\n")
-	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
+	fmt.Println("\nPerformance (Client-Side Measurements):")
+	fmt.Println("─────────────────────────────────────────────────")
 
-	type perfResult struct {
-		nodeID int32
-		reply  *pb.GetPerformanceReply
-		err    error
+	// CLIENT-SIDE METRICS (per project spec: measured from client initiation to reply)
+	m.latencyMu.Lock()
+	totalTxns := m.totalTxns
+	successTxns := m.successfulTxns
+	failedTxns := m.failedTxns
+	crossShard := m.crossShardTxns
+	intraShard := m.intraShardTxns
+	latenciesCopy := make([]time.Duration, len(m.latencies))
+	copy(latenciesCopy, m.latencies)
+	startTime := m.testSetStartTime
+	m.latencyMu.Unlock()
+
+	// Calculate throughput
+	elapsed := time.Since(startTime)
+	var throughput float64
+	if elapsed.Seconds() > 0 && totalTxns > 0 {
+		throughput = float64(totalTxns) / elapsed.Seconds()
 	}
 
-	resultChan := make(chan perfResult, 9)
-
-	for nodeID := int32(1); nodeID <= 9; nodeID++ {
-		go func(nid int32) {
-			client, exists := m.nodeClients[nid]
-			if !exists {
-				resultChan <- perfResult{nodeID: nid, err: fmt.Errorf("not connected")}
-				return
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			resp, err := client.GetPerformance(ctx, &pb.GetPerformanceRequest{
-				ResetCounters: false,
-			})
-
-			resultChan <- perfResult{nodeID: nid, reply: resp, err: err}
-		}(nodeID)
-	}
-
-	// Collect and display results
-	for i := 0; i < 9; i++ {
-		result := <-resultChan
-		if result.err != nil {
-			fmt.Printf("Node %d: ❌ Error: %v\n", result.nodeID, result.err)
-		} else if result.reply != nil {
-			r := result.reply
-			fmt.Printf("\n--- Node %d (Cluster %d) ---\n", r.NodeId, r.ClusterId)
-			fmt.Printf("  Throughput: %s\n", r.Message)
-			fmt.Printf("  Total Transactions: %d (Success: %d, Failed: %d)\n",
-				r.TotalTransactions, r.SuccessfulTransactions, r.FailedTransactions)
-			fmt.Printf("  Avg Latency: %.2f ms\n", r.AvgTransactionTimeMs)
-			fmt.Printf("  2PC: Coordinator=%d, Participant=%d, Commits=%d, Aborts=%d\n",
-				r.TwopcCoordinator, r.TwopcParticipant, r.TwopcCommits, r.TwopcAborts)
-			if r.Avg_2PcTimeMs > 0 {
-				fmt.Printf("  2PC Avg Latency: %.2f ms\n", r.Avg_2PcTimeMs)
-			}
-			fmt.Printf("  Elections: Started=%d, Won=%d\n",
-				r.ElectionsStarted, r.ElectionsWon)
-			fmt.Printf("  Locks: Acquired=%d, Timeout=%d\n",
-				r.LocksAcquired, r.LocksTimeout)
-			fmt.Printf("  Uptime: %d seconds\n", r.UptimeSeconds)
+	// Calculate average latency
+	var avgLatencyMs float64
+	if len(latenciesCopy) > 0 {
+		var sum time.Duration
+		for _, l := range latenciesCopy {
+			sum += l
 		}
+		avgLatencyMs = float64(sum.Microseconds()) / float64(len(latenciesCopy)) / 1000.0
 	}
+
+	// Calculate percentiles (p50, p99)
+	var p50Ms, p99Ms float64
+	if len(latenciesCopy) > 0 {
+		sort.Slice(latenciesCopy, func(i, j int) bool {
+			return latenciesCopy[i] < latenciesCopy[j]
+		})
+		p50Idx := len(latenciesCopy) / 2
+		p99Idx := len(latenciesCopy) * 99 / 100
+		p50Ms = float64(latenciesCopy[p50Idx].Microseconds()) / 1000.0
+		p99Ms = float64(latenciesCopy[p99Idx].Microseconds()) / 1000.0
+	}
+
+	// Print client-side summary (REQUIRED by project spec)
+	fmt.Printf("Throughput:       %.2f TPS\n", throughput)
+	fmt.Printf("Avg Latency:      %.2f ms\n", avgLatencyMs)
+	fmt.Printf("P50 Latency:      %.2f ms\n", p50Ms)
+	fmt.Printf("P99 Latency:      %.2f ms\n", p99Ms)
+	fmt.Println("─────────────────────────────────────────────────")
+	fmt.Printf("Total Txns:       %d (Success: %d, Failed: %d)\n", totalTxns, successTxns, failedTxns)
+	fmt.Printf("Cross-Shard:      %d (%.1f%%)\n", crossShard, safePct(crossShard, totalTxns))
+	fmt.Printf("Intra-Shard:      %d (%.1f%%)\n", intraShard, safePct(intraShard, totalTxns))
+	if totalTxns > 0 {
+		fmt.Printf("Success Rate:     %.1f%%\n", safePct(successTxns, totalTxns))
+	}
+	fmt.Printf("Elapsed Time:     %.2f seconds\n", elapsed.Seconds())
+	fmt.Println("─────────────────────────────────────────────────")
 	fmt.Println()
+}
+
+// safePct calculates percentage safely
+func safePct(num, denom int64) float64 {
+	if denom == 0 {
+		return 0
+	}
+	return float64(num) / float64(denom) * 100
 }

@@ -58,8 +58,9 @@ type Node struct {
 	execNotify chan struct{} // Signal when new sequences are committed
 
 	// Logs (protected by logMu)
-	log        map[int32]*types.LogEntry // Single log with status tracking (A/C/E)
-	newViewLog []*pb.NewViewRequest
+	log               map[int32]*types.LogEntry // Single log with status tracking (A/C/E)
+	newViewLog        []*pb.NewViewRequest
+	bootstrapComplete bool // Set after first transaction - only log NEW-VIEWs after this
 
 	// Client tracking (protected by clientMu)
 	clientLastReply map[string]*pb.TransactionReply
@@ -408,6 +409,14 @@ func (n *Node) getCrossClusterClient(nodeID int32) (pb.PaxosNodeClient, error) {
 	return client, nil
 }
 
+// isExpectedLeader returns true if this node is the expected leader for its cluster
+// The expected leader is the first (lowest-numbered) node in the cluster config
+// This is used to prevent election storms during bootstrap
+func (n *Node) isExpectedLeader() bool {
+	expectedLeader := n.config.GetLeaderNodeForCluster(int(n.clusterID))
+	return n.id == expectedLeader
+}
+
 func (n *Node) Stop() {
 	// Check and update active status (use paxosMu)
 	n.paxosMu.Lock()
@@ -478,18 +487,33 @@ func (n *Node) startLeaderTimer() {
 			n.paxosMu.RLock()
 			isLeader := n.isLeader
 			active := n.isActive
+			knownLeader := n.leaderID
 			n.paxosMu.RUnlock()
 
 			if !isLeader && active {
-				log.Printf("Node %d: ⏰ Leader timeout - starting election", n.id)
-				go n.StartLeaderElection()
+				// SIMPLE ELECTION POLICY:
+				// Only expected leaders (first node in cluster: n1, n4, n7) can start
+				// elections from the timer. This prevents election storms.
+				//
+				// Non-expected leaders handle leader failure differently:
+				// - When they try to forward a transaction and it fails, they start election
+				// - This is handled in SubmitTransaction
+				//
+				// This approach ensures clean, predictable leader election.
+				if n.isExpectedLeader() && knownLeader <= 0 {
+					log.Printf("Node %d: ⏰ Leader timeout - starting election (expected leader, no known leader)",
+						n.id)
+					go n.StartLeaderElection()
+				}
 			}
 
-			// IMPORTANT: Do NOT reset timer here!
-			// The timer will be reset by:
-			// 1. Message handlers (ACCEPT, COMMIT, NEW-VIEW) when receiving leader activity
-			// 2. After becoming leader/inactive (timer will be stopped)
-			// This goroutine just consumes timer events and triggers elections
+			// Reset timer for next check
+			// Timer is also reset by message handlers when receiving leader activity
+			n.timerMu.Lock()
+			if n.leaderTimer != nil {
+				n.leaderTimer.Reset(n.timerDuration)
+			}
+			n.timerMu.Unlock()
 		}
 	}()
 }
@@ -830,10 +854,12 @@ func (n *Node) checkForGaps() {
 				n.id, lastExec, maxSeq, leaderID)
 			go n.requestRecoveryFromLeader(leaderID)
 		} else if hasGaps && !isLeader && leaderID <= 0 {
-			// We have gaps but no known leader - trigger election so someone else can become leader
-			log.Printf("Node %d: 🔍 Detected persistent gaps with no leader (lastExec=%d, maxSeq=%d) - triggering election (won't become leader ourselves)",
-				n.id, lastExec, maxSeq)
-			go n.StartLeaderElection()
+			// We have gaps but no known leader - only expected leaders should trigger election
+			if n.isExpectedLeader() {
+				log.Printf("Node %d: 🔍 Detected persistent gaps with no leader (lastExec=%d, maxSeq=%d) - triggering election",
+					n.id, lastExec, maxSeq)
+				go n.StartLeaderElection()
+			}
 		}
 	}
 }
@@ -1080,6 +1106,7 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 	if req.ResetLogs {
 		n.log = make(map[int32]*types.LogEntry)
 		n.newViewLog = make([]*pb.NewViewRequest, 0)
+		n.bootstrapComplete = false // Reset so bootstrap NEW-VIEWs aren't logged
 		n.clientLastReply = make(map[string]*pb.TransactionReply)
 		n.clientLastTS = make(map[string]int64)
 		n.nextSeqNum = 1
@@ -1168,5 +1195,141 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 	return &pb.FlushStateReply{
 		Success: true,
 		Message: fmt.Sprintf("Node %d state flushed", n.id),
+	}, nil
+}
+
+// ============================================================================
+// PRINT FUNCTIONS - Required by project specification
+// ============================================================================
+
+// PrintDB returns all modified balances on this node
+func (n *Node) PrintDB(ctx context.Context, req *pb.PrintDBRequest) (*pb.PrintDBReply, error) {
+	n.balanceMu.RLock()
+	defer n.balanceMu.RUnlock()
+
+	initialBalance := n.config.Data.InitialBalance
+	var balances []*pb.BalanceEntry
+
+	// Get cluster info
+	cluster := n.config.Clusters[int(n.clusterID)]
+
+	for itemID, balance := range n.balances {
+		// Include if different from initial balance OR if requested to include zero balance
+		if balance != initialBalance || req.IncludeZeroBalance {
+			balances = append(balances, &pb.BalanceEntry{
+				DataItem: itemID,
+				Balance:  balance,
+			})
+		}
+	}
+
+	// Apply limit if specified
+	if req.Limit > 0 && int32(len(balances)) > req.Limit {
+		balances = balances[:req.Limit]
+	}
+
+	return &pb.PrintDBReply{
+		Success:    true,
+		Balances:   balances,
+		TotalItems: int32(len(n.balances)),
+		ShardStart: cluster.ShardStart,
+		ShardEnd:   cluster.ShardEnd,
+		NodeId:     n.id,
+		ClusterId:  n.clusterID,
+		Message:    fmt.Sprintf("Node %d: %d modified items", n.id, len(balances)),
+	}, nil
+}
+
+// PrintView returns NEW-VIEW messages with all parameters (required by project spec)
+func (n *Node) PrintView(ctx context.Context, req *pb.PrintViewRequest) (*pb.PrintViewReply, error) {
+	// Collect Paxos state
+	n.paxosMu.RLock()
+	isLeader := n.isLeader
+	leaderID := n.leaderID
+	ballotNum := n.currentBallot.Number
+	ballotNode := n.currentBallot.NodeID
+	isActive := n.isActive
+	n.paxosMu.RUnlock()
+
+	n.logMu.RLock()
+	nextSeq := n.nextSeqNum
+	lastExec := n.lastExecuted
+	newViewCount := len(n.newViewLog)
+	// Copy NEW-VIEW log for safe access
+	newViewCopy := make([]*pb.NewViewRequest, len(n.newViewLog))
+	copy(newViewCopy, n.newViewLog)
+	n.logMu.RUnlock()
+
+	// Build message with NEW-VIEW details (required by project spec)
+	var message string
+	if newViewCount == 0 {
+		message = fmt.Sprintf("Node %d: No NEW-VIEW messages (no leader elections since test start)", n.id)
+	} else {
+		message = fmt.Sprintf("Node %d: %d NEW-VIEW message(s):\n", n.id, newViewCount)
+		for i, nv := range newViewCopy {
+			ballot := types.BallotFromProto(nv.Ballot)
+			message += fmt.Sprintf("  [%d] NEW-VIEW Ballot=(%d,%d) LeaderNode=%d AcceptMsgs=%d\n",
+				i+1, ballot.Number, ballot.NodeID, ballot.NodeID, len(nv.AcceptMessages))
+
+			// Include accept message details (all parameters)
+			for j, acc := range nv.AcceptMessages {
+				if acc.IsNoop {
+					message += fmt.Sprintf("      %d. Seq=%d NO-OP\n", j+1, acc.SequenceNumber)
+				} else if acc.Request != nil && acc.Request.Transaction != nil {
+					tx := acc.Request.Transaction
+					message += fmt.Sprintf("      %d. Seq=%d Txn=(%d->%d:%d)\n",
+						j+1, acc.SequenceNumber, tx.Sender, tx.Receiver, tx.Amount)
+				}
+			}
+		}
+	}
+
+	// Include recent log entries if requested
+	var recentLog []*pb.LogEntrySummary
+	if req.IncludeLog {
+		n.logMu.RLock()
+		logEntries := req.LogEntries
+		if logEntries <= 0 {
+			logEntries = 10 // Default
+		}
+
+		// Get last N entries
+		startSeq := n.lastExecuted - logEntries + 1
+		if startSeq < 1 {
+			startSeq = 1
+		}
+
+		for seq := startSeq; seq <= n.lastExecuted; seq++ {
+			if entry, ok := n.log[seq]; ok {
+				summary := &pb.LogEntrySummary{
+					Sequence: seq,
+					Executed: entry.Status == "E",
+				}
+				if !entry.IsNoOp && entry.Request != nil && entry.Request.Transaction != nil {
+					tx := entry.Request.Transaction
+					summary.Sender = tx.Sender
+					summary.Receiver = tx.Receiver
+					summary.Amount = tx.Amount
+					summary.ClientId = entry.Request.ClientId
+				}
+				recentLog = append(recentLog, summary)
+			}
+		}
+		n.logMu.RUnlock()
+	}
+
+	return &pb.PrintViewReply{
+		Success:      true,
+		NodeId:       n.id,
+		ClusterId:    n.clusterID,
+		IsLeader:     isLeader,
+		LeaderId:     leaderID,
+		BallotNumber: ballotNum,
+		BallotNodeId: ballotNode,
+		NextSequence: nextSeq,
+		LastExecuted: lastExec,
+		RecentLog:    recentLog,
+		IsActive:     isActive,
+		Message:      message,
 	}, nil
 }

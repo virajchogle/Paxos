@@ -170,15 +170,9 @@ func (n *Node) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Promise
 	reqBallot := types.BallotFromProto(req.Ballot)
 	log.Printf("Node %d: Received PREPARE %s from node %d", n.id, reqBallot.String(), req.NodeId)
 
-	// 🎯 Mark system as initialized when receiving PREPARE (use paxosMu)
-	n.paxosMu.Lock()
-	if !n.systemInitialized {
-		n.systemInitialized = true
-		n.paxosMu.Unlock()
-		log.Printf("Node %d: System initialized by PREPARE from node %d", n.id, req.NodeId)
-	} else {
-		n.paxosMu.Unlock()
-	}
+	// NOTE: Don't set systemInitialized here - it should only be set when
+	// transactions are actually being processed, not during election.
+	// This prevents non-expected leaders from starting elections during bootstrap.
 
 	// Check if node is active and ballot (use paxosMu)
 	n.paxosMu.RLock()
@@ -323,8 +317,11 @@ func (n *Node) sendNewView(acceptLogs [][]*pb.AcceptedEntry, ballot *types.Ballo
 	}
 
 	// Store NEW-VIEW and update nextSeqNum (use logMu)
+	// Only log NEW-VIEWs after bootstrap completes (first transaction processed)
 	n.logMu.Lock()
-	n.newViewLog = append(n.newViewLog, newView)
+	if n.bootstrapComplete {
+		n.newViewLog = append(n.newViewLog, newView)
+	}
 	n.nextSeqNum = maxSeq + 1
 	n.logMu.Unlock()
 
@@ -434,16 +431,9 @@ func (n *Node) mergeAcceptLogs(logs [][]*pb.AcceptedEntry) map[int32]*pb.Accepte
 func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewViewReply, error) {
 	log.Printf("Node %d: Received NEW-VIEW with %d messages", n.id, len(req.AcceptMessages))
 
-	// 🎯 Mark system as initialized when receiving NEW-VIEW (use paxosMu)
-	n.paxosMu.Lock()
-	if !n.systemInitialized {
-		n.systemInitialized = true
-		n.paxosMu.Unlock()
-		ballot := types.BallotFromProto(req.Ballot)
-		log.Printf("Node %d: System initialized by NEW-VIEW from node %d", n.id, ballot.NodeID)
-	} else {
-		n.paxosMu.Unlock()
-	}
+	// NOTE: Don't set systemInitialized here - it should only be set when
+	// transactions are actually being processed, not during election.
+	// This prevents non-expected leaders from starting elections during bootstrap.
 
 	// Check if node is active (use paxosMu)
 	n.paxosMu.RLock()
@@ -456,18 +446,21 @@ func (n *Node) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.NewView
 	}
 
 	// Store NEW-VIEW message for PrintView (use logMu)
+	// Only log NEW-VIEWs after bootstrap completes (first transaction processed)
 	n.logMu.Lock()
-	// Check if we already have this exact NEW-VIEW (avoid duplicates)
-	alreadyStored := false
-	for _, stored := range n.newViewLog {
-		if stored.Ballot.Number == req.Ballot.Number &&
-			stored.Ballot.NodeId == req.Ballot.NodeId {
-			alreadyStored = true
-			break
+	if n.bootstrapComplete {
+		// Check if we already have this exact NEW-VIEW (avoid duplicates)
+		alreadyStored := false
+		for _, stored := range n.newViewLog {
+			if stored.Ballot.Number == req.Ballot.Number &&
+				stored.Ballot.NodeId == req.Ballot.NodeId {
+				alreadyStored = true
+				break
+			}
 		}
-	}
-	if !alreadyStored {
-		n.newViewLog = append(n.newViewLog, req)
+		if !alreadyStored {
+			n.newViewLog = append(n.newViewLog, req)
+		}
 	}
 	n.logMu.Unlock()
 

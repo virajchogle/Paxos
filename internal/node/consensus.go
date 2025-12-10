@@ -38,16 +38,21 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 	if !systemInit {
 		n.paxosMu.Lock()
 		if !n.systemInitialized { // Double-check under lock
-			n.systemInitialized = true
-			n.paxosMu.Unlock()
+			if n.isExpectedLeader() {
+				// Expected leader: Mark system initialized and start election
+				n.systemInitialized = true
+				n.paxosMu.Unlock()
 
-			if nodeID == 1 || nodeID == 4 || nodeID == 7 {
-				// Expected leader nodes (n1, n4, n7): Start leader election immediately
+				// Expected leader node: Start leader election immediately
 				log.Printf("Node %d: 🚀 First transaction received - bootstrapping system and starting leader election", nodeID)
 				// Start election directly - no need for timer since we're the expected leader
 				go n.StartLeaderElection()
 				bootstrapElectionStarted = true
 			} else {
+				// Non-expected leader: DON'T set systemInitialized
+				// This prevents timer-based elections from non-expected leaders
+				n.paxosMu.Unlock()
+
 				// Other nodes: Forward to expected leader (n1, n4, or n7) to trigger bootstrap
 				log.Printf("Node %d: 🔄 First transaction received - forwarding to expected leader to bootstrap system", nodeID)
 
@@ -110,14 +115,17 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 				n.leaderID = 0 // Clear failed leader
 				n.paxosMu.Unlock()
 
-				// Fall through to wait for election below
-				log.Printf("Node %d: Leader failed, will wait for new election", n.id)
+				// Leader failure detected - start election (any node can do this)
+				log.Printf("Node %d: Leader %d failed, starting election", n.id, leaderID)
+				go n.StartLeaderElection()
 			}
 		}
 
 		// No leader known - start election and wait for it to complete
 		// (unless we already started one during bootstrap)
-		if !bootstrapElectionStarted {
+		// IMPORTANT: Only expected leaders should start elections on fresh bootstrap
+		// This prevents election storms where all nodes try to become leaders
+		if !bootstrapElectionStarted && n.isExpectedLeader() {
 			go n.StartLeaderElection()
 		}
 
@@ -280,11 +288,12 @@ func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*
 	}
 
 	// Trigger election if no leader (for bootstrap)
+	// IMPORTANT: Only expected leaders should start elections on fresh bootstrap
 	n.paxosMu.RLock()
 	hasLeader := n.isLeader || n.leaderID > 0
 	n.paxosMu.RUnlock()
 
-	if !hasLeader {
+	if !hasLeader && n.isExpectedLeader() {
 		go n.StartLeaderElection()
 	}
 
@@ -852,6 +861,15 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 	if entry.IsNoOp {
 		return pb.ResultType_SUCCESS
 	}
+
+	// Mark bootstrap as complete after first real transaction
+	// This ensures NEW-VIEW messages are only logged after bootstrap
+	n.logMu.Lock()
+	if !n.bootstrapComplete {
+		n.bootstrapComplete = true
+		log.Printf("Node %d: Bootstrap complete - now tracking NEW-VIEW messages", n.id)
+	}
+	n.logMu.Unlock()
 
 	tx := entry.Request.Transaction
 	sender := tx.Sender

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -43,6 +44,15 @@ func LoadConfig(filename string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+
+	// Override initial_balance from environment variable if set
+	// Use INITIAL_BALANCE=100000 for benchmarking, default 10 for tests
+	if envBalance := os.Getenv("INITIAL_BALANCE"); envBalance != "" {
+		if balance, err := strconv.ParseInt(envBalance, 10, 32); err == nil {
+			cfg.Data.InitialBalance = int32(balance)
+		}
+	}
+
 	return &cfg, nil
 }
 
