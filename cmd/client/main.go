@@ -454,7 +454,7 @@ func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
 			txn := cmd.Transaction
 			err := m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount)
 			if err == nil {
-				fmt.Printf("  ✅ %d→%d (retry)\n", txn.Sender, txn.Receiver)
+				fmt.Printf("  ✅ %d→%d: %d (retry)\n", txn.Sender, txn.Receiver, txn.Amount)
 				roundSuccess++
 			} else {
 				errMsg := err.Error()
@@ -463,7 +463,7 @@ func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
 					strings.Contains(errMsg, "ABORTED") ||
 					strings.Contains(errMsg, "2PC failed")
 				if isPermanent {
-					fmt.Printf("  ❌ %d→%d (permanent)\n", txn.Sender, txn.Receiver)
+					fmt.Printf("  ❌ %d→%d: %d - %v\n", txn.Sender, txn.Receiver, txn.Amount, err)
 				} else {
 					m.mu.Lock()
 					m.pendingQueue = append(m.pendingQueue, cmd)
@@ -941,12 +941,12 @@ func (m *ClientManager) sendParallel(cmds []utils.Command, concurrency int, hasQ
 			fmt.Printf("✅ %d→%d: %d%s\n", txn.Sender, txn.Receiver, txn.Amount, crossShard)
 			successCount++
 		} else if result.ShouldQueue {
-			fmt.Printf("⏸️  %d→%d: %d - queued\n", txn.Sender, txn.Receiver, txn.Amount)
+			fmt.Printf("⏸️  %d→%d: %d - queued (%v)\n", txn.Sender, txn.Receiver, txn.Amount, result.Error)
 			m.mu.Lock()
 			m.pendingQueue = append(m.pendingQueue, result.Cmd)
 			m.mu.Unlock()
 		} else {
-			fmt.Printf("❌ %d→%d: %d - failed\n", txn.Sender, txn.Receiver, txn.Amount)
+			fmt.Printf("❌ %d→%d: %d - %v\n", txn.Sender, txn.Receiver, txn.Amount, result.Error)
 		}
 	}
 
