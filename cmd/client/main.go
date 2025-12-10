@@ -324,16 +324,14 @@ func (m *ClientManager) processNextSet() {
 	m.txnHistoryMu.Unlock()
 	m.resetClientMetrics()
 
-	if m.currentSet > 0 {
-		m.flushAllNodes()
-		time.Sleep(100 * time.Millisecond)
-	}
+	// Always flush to ensure clean state (including test set 1)
+	m.flushAllNodes()
+	time.Sleep(100 * time.Millisecond)
 
 	set := m.testSets[m.currentSet]
 	m.currentSet++
 
-	fmt.Printf("\n=== Test Set %d (Nodes: %v, Commands: %d) ===\n",
-		set.SetNumber, set.ActiveNodes, len(set.Commands))
+	fmt.Printf("--- Test Set %d ---\n", set.SetNumber)
 
 	hasQuorum := len(set.ActiveNodes) >= 3
 	if !hasQuorum {
@@ -432,16 +430,21 @@ func (m *ClientManager) processNextSet() {
 
 func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
 	totalSuccess := 0
+	round := 0
 	for {
 		m.mu.Lock()
-		if len(m.pendingQueue) == 0 {
+		queueLen := len(m.pendingQueue)
+		if queueLen == 0 {
 			m.mu.Unlock()
 			return totalSuccess
 		}
-		queuedCmds := make([]utils.Command, len(m.pendingQueue))
+		queuedCmds := make([]utils.Command, queueLen)
 		copy(queuedCmds, m.pendingQueue)
 		m.pendingQueue = make([]utils.Command, 0)
 		m.mu.Unlock()
+
+		round++
+		time.Sleep(100 * time.Millisecond)
 
 		roundSuccess := 0
 		for _, cmd := range queuedCmds {
@@ -449,12 +452,23 @@ func (m *ClientManager) retryQueuedTransactionsUntilDone() int {
 				continue
 			}
 			txn := cmd.Transaction
-			if m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount) == nil {
+			err := m.sendTransaction(txn.Sender, txn.Receiver, txn.Amount)
+			if err == nil {
+				fmt.Printf("  ✅ %d→%d (retry)\n", txn.Sender, txn.Receiver)
 				roundSuccess++
 			} else {
-				m.mu.Lock()
-				m.pendingQueue = append(m.pendingQueue, cmd)
-				m.mu.Unlock()
+				errMsg := err.Error()
+				isPermanent := strings.Contains(errMsg, "permanently failed") ||
+					strings.Contains(errMsg, "Insufficient balance") ||
+					strings.Contains(errMsg, "ABORTED") ||
+					strings.Contains(errMsg, "2PC failed")
+				if isPermanent {
+					fmt.Printf("  ❌ %d→%d (permanent)\n", txn.Sender, txn.Receiver)
+				} else {
+					m.mu.Lock()
+					m.pendingQueue = append(m.pendingQueue, cmd)
+					m.mu.Unlock()
+				}
 			}
 		}
 		totalSuccess += roundSuccess
@@ -838,7 +852,9 @@ func (m *ClientManager) sendParallel(cmds []utils.Command, concurrency int, hasQ
 	sem := make(chan struct{}, concurrency) // Limit concurrent transactions
 	var wg sync.WaitGroup
 
-	fmt.Printf("🚀 Sending %d transactions in parallel (max %d concurrent)...\n", len(cmds), concurrency)
+	if len(cmds) > 1 {
+		fmt.Printf("Sending %d transactions...\n", len(cmds))
+	}
 
 	for i, cmd := range cmds {
 		if cmd.Type != "transaction" {
@@ -870,10 +886,19 @@ func (m *ClientManager) sendParallel(cmds []utils.Command, concurrency int, hasQ
 
 			shouldQueue := false
 			if err != nil {
-				// Check if it's a business logic failure vs system error
 				errMsg := err.Error()
-				if !strings.Contains(errMsg, "transaction failed:") && !strings.Contains(errMsg, "Insufficient balance") {
-					// Network/system error - should queue
+				// Permanent failures - don't retry:
+				// - "permanently failed" = 2PC abort consensus completed
+				// - "Insufficient balance" = business logic rejection
+				// - "ABORTED" = 2PC explicitly aborted
+				// - "2PC failed" = any 2PC failure (cross-shard lock conflicts are permanent)
+				isPermanent := strings.Contains(errMsg, "permanently failed") ||
+					strings.Contains(errMsg, "Insufficient balance") ||
+					strings.Contains(errMsg, "ABORTED") ||
+					strings.Contains(errMsg, "2PC failed")
+
+				if !isPermanent {
+					// Intra-shard failures should retry (locks are brief)
 					shouldQueue = true
 				}
 			}
@@ -907,26 +932,21 @@ func (m *ClientManager) sendParallel(cmds []utils.Command, concurrency int, hasQ
 		txn := result.Cmd.Transaction
 		senderCluster := m.getClusterForDataItem(txn.Sender)
 		receiverCluster := m.getClusterForDataItem(txn.Receiver)
+		crossShard := ""
+		if senderCluster != receiverCluster {
+			crossShard = " (cross)"
+		}
 
 		if result.Success {
-			if senderCluster == receiverCluster {
-				fmt.Printf("✅ [%d/%d] %d → %d: %d units (Cluster %d)\n",
-					result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, senderCluster)
-			} else {
-				fmt.Printf("✅ [%d/%d] %d → %d: %d units (C%d→C%d cross-shard)\n",
-					result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, senderCluster, receiverCluster)
-			}
+			fmt.Printf("✅ %d→%d: %d%s\n", txn.Sender, txn.Receiver, txn.Amount, crossShard)
 			successCount++
 		} else if result.ShouldQueue {
-			fmt.Printf("⏸️  [%d/%d] %d → %d: %d units - QUEUED (%v)\n",
-				result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, result.Error)
+			fmt.Printf("⏸️  %d→%d: %d - queued\n", txn.Sender, txn.Receiver, txn.Amount)
 			m.mu.Lock()
 			m.pendingQueue = append(m.pendingQueue, result.Cmd)
 			m.mu.Unlock()
 		} else {
-			// Business logic failure
-			fmt.Printf("❌ [%d/%d] %d → %d: %d units - FAILED: %v\n",
-				result.Index+1, len(cmds), txn.Sender, txn.Receiver, txn.Amount, result.Error)
+			fmt.Printf("❌ %d→%d: %d - failed\n", txn.Sender, txn.Receiver, txn.Amount)
 		}
 	}
 
@@ -948,7 +968,7 @@ func (m *ClientManager) sendSingleTransaction(senderStr, receiverStr, amountStr 
 	}
 }
 
-// queryBalance queries the balance of a data item (Phase 3: Read-only transactions)
+// queryBalance queries the balance of a data item (linearizable read via leader)
 func (m *ClientManager) queryBalance(dataItemIDStr string) {
 	var dataItemID int32
 	if _, err := fmt.Sscanf(dataItemIDStr, "%d", &dataItemID); err != nil {
@@ -956,34 +976,47 @@ func (m *ClientManager) queryBalance(dataItemIDStr string) {
 		return
 	}
 
-	// Determine which cluster owns this data item
 	cluster := m.config.GetClusterForDataItem(dataItemID)
-
-	// Get any node from that cluster (read can go to any replica)
 	clusterNodes := m.config.GetNodesInCluster(cluster)
-	if len(clusterNodes) == 0 {
-		fmt.Printf("❌ No nodes found in cluster %d\n", cluster)
-		return
-	}
 
-	// Try each node in the cluster until we get a response
+	// Retry up to 3 times (wait for potential election from concurrent writes)
 	var resp *pb.BalanceQueryReply
 	var err error
+	var lastMsg string
 
-	for _, nodeID := range clusterNodes {
-		client, exists := m.nodeClients[int32(nodeID)]
-		if !exists || client == nil {
-			continue
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(500 * time.Millisecond)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		resp, err = client.QueryBalance(ctx, &pb.BalanceQueryRequest{
-			DataItemId: dataItemID,
-		})
-		cancel()
+		// Try leader first, then other nodes (they will forward to leader)
+		leaderID := m.clusterLeaders[int32(cluster)]
+		nodesToTry := []int32{leaderID}
+		for _, nid := range clusterNodes {
+			if int32(nid) != leaderID {
+				nodesToTry = append(nodesToTry, int32(nid))
+			}
+		}
 
-		if err == nil && resp != nil && resp.Success {
-			break
+		for _, nodeID := range nodesToTry {
+			client, exists := m.nodeClients[nodeID]
+			if !exists || client == nil {
+				continue
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			resp, err = client.QueryBalance(ctx, &pb.BalanceQueryRequest{
+				DataItemId: dataItemID,
+			})
+			cancel()
+
+			if err == nil && resp != nil && resp.Success {
+				fmt.Printf("Balance(%d) = %d\n", dataItemID, resp.Balance)
+				return
+			}
+			if resp != nil && resp.Message != "" {
+				lastMsg = resp.Message
+			}
 		}
 	}
 
@@ -991,19 +1024,11 @@ func (m *ClientManager) queryBalance(dataItemIDStr string) {
 		fmt.Printf("❌ Query failed: %v\n", err)
 		return
 	}
-
-	if resp == nil || !resp.Success {
-		msg := "unknown error"
-		if resp != nil {
-			msg = resp.Message
-		}
-		fmt.Printf("❌ Query failed: %s\n", msg)
-		return
+	if lastMsg != "" {
+		fmt.Printf("❌ Query failed: %s\n", lastMsg)
+	} else {
+		fmt.Printf("❌ Query failed: no available leader\n")
 	}
-
-	// Success - show balance
-	fmt.Printf("📖 Balance of item %d: %d (from node %d, cluster %d)\n",
-		dataItemID, resp.Balance, resp.NodeId, resp.ClusterId)
 }
 
 func (m *ClientManager) showStatus() {
@@ -1656,10 +1681,7 @@ func (m *ClientManager) executeReshard() {
 
 // flushAllNodes implements Flush - reset all node state
 func (m *ClientManager) flushAllNodes() {
-	fmt.Printf("\n╔════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  Flushing System State - All Nodes                    ║\n")
-	fmt.Printf("╚════════════════════════════════════════════════════════╝\n")
-	fmt.Println("Resetting all nodes to initial state...")
+	fmt.Print("Flushing all nodes...")
 
 	type flushResult struct {
 		nodeID int32
@@ -1700,15 +1722,11 @@ func (m *ClientManager) flushAllNodes() {
 	successCount := 0
 	for i := 0; i < 9; i++ {
 		result := <-resultChan
-		if result.err != nil {
-			fmt.Printf("  Node %d: ❌ Error: %v\n", result.nodeID, result.err)
-		} else {
-			fmt.Printf("  Node %d: ✅ Flushed\n", result.nodeID)
+		if result.err == nil {
 			successCount++
 		}
 	}
-
-	fmt.Printf("\n✅ Flush complete: %d/9 nodes reset\n", successCount)
+	fmt.Printf(" %d/9 reset\n", successCount)
 
 	// Reset client-side tracking
 	m.mu.Lock()

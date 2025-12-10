@@ -233,27 +233,56 @@ func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*
 		}, nil
 	}
 
-	// Trigger election if no leader (for bootstrap)
-	// IMPORTANT: Only expected leaders should start elections on fresh bootstrap
+	// Linearizable reads: forward to leader
 	n.paxosMu.RLock()
-	hasLeader := n.isLeader || n.leaderID > 0
+	isLeader := n.isLeader
+	leaderID := n.leaderID
 	n.paxosMu.RUnlock()
 
-	if !hasLeader && n.isExpectedLeader() {
-		go n.StartLeaderElection()
+	// If not leader, forward to leader for linearizability
+	if !isLeader {
+		if leaderID > 0 && leaderID != n.id {
+			if leaderClient, ok := n.peerClients[leaderID]; ok {
+				ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				return leaderClient.QueryBalance(ctx2, req)
+			}
+		}
+		// No leader known - trigger election if expected leader
+		if n.isExpectedLeader() {
+			go n.StartLeaderElection()
+		}
+		return &pb.BalanceQueryReply{
+			Success:   false,
+			Balance:   0,
+			Message:   "No leader available - retry later",
+			NodeId:    n.id,
+			ClusterId: n.clusterID,
+		}, nil
 	}
 
-	// Read balance from local replica (use balanceMu)
+	// Leader: check if item is locked by a write (prevent dirty reads)
+	n.lockMu.Lock()
+	if lock, locked := n.locks[dataItemID]; locked && lock != nil {
+		n.lockMu.Unlock()
+		return &pb.BalanceQueryReply{
+			Success:   false,
+			Balance:   0,
+			Message:   "Item locked, transaction in progress - retry later",
+			NodeId:    n.id,
+			ClusterId: n.clusterID,
+		}, nil
+	}
+	n.lockMu.Unlock()
+
+	// Leader reads from local state (guaranteed to be up-to-date)
 	n.balanceMu.RLock()
 	balance, exists := n.balances[dataItemID]
 	n.balanceMu.RUnlock()
 
 	if !exists {
-		// Item exists in this cluster's range but hasn't been modified yet
 		balance = n.config.Data.InitialBalance
 	}
-
-	log.Printf("Node %d: 📖 Balance query for item %d = %d", n.id, dataItemID, balance)
 
 	return &pb.BalanceQueryReply{
 		Success:   true,
