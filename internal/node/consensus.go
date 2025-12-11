@@ -835,19 +835,30 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 			return pb.ResultType_SUCCESS // Nothing to do for this node
 		}
 
-		// Determine which items to lock
-		var itemsToProcess []int32
-		if ownsSender {
-			itemsToProcess = []int32{sender}
-		} else {
-			itemsToProcess = []int32{recv}
-		}
+		// Check if this is a 2PC transaction (Phase == "P" for PREPARE)
+		// For 2PC transactions, locks are managed by TwoPCCoordinator/TwoPCPrepare
+		// and should NOT be released until COMMIT/ABORT phase
+		is2PCTransaction := entry.Phase == "P"
 
-		acquired, lockedItems := n.acquireLocks(itemsToProcess, clientID, timestamp)
-		if !acquired {
-			return pb.ResultType_FAILED
+		// For non-2PC cross-shard (shouldn't happen, but handle gracefully)
+		// or if we need to verify lock for 2PC
+		if !is2PCTransaction {
+			// Determine which items to lock
+			var itemsToProcess []int32
+			if ownsSender {
+				itemsToProcess = []int32{sender}
+			} else {
+				itemsToProcess = []int32{recv}
+			}
+
+			acquired, lockedItems := n.acquireLocks(itemsToProcess, clientID, timestamp)
+			if !acquired {
+				return pb.ResultType_FAILED
+			}
+			defer n.releaseLocks(lockedItems, clientID, timestamp)
 		}
-		defer n.releaseLocks(lockedItems, clientID, timestamp)
+		// For 2PC transactions: locks are already held by 2PC code and will be
+		// released during COMMIT/ABORT phase (via cleanup2PCCoordinator/cleanup2PCParticipant)
 
 		var changedItemID int32
 		var result pb.ResultType
