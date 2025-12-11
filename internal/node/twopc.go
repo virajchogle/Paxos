@@ -50,25 +50,32 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
 	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
 
-	n.balanceMu.Lock()
-
+	// Use lockMu for lock operations (consistent with acquireLock/releaseLock)
+	n.lockMu.Lock()
 	senderLock, senderLocked := n.locks[tx.Sender]
 	if senderLocked && senderLock.clientID != clientID {
-		n.balanceMu.Unlock()
+		n.lockMu.Unlock()
 		n.cacheResult(clientID, timestamp, false, pb.ResultType_FAILED)
 		return false, fmt.Errorf("sender item locked")
-	}
-
-	senderBalance := n.balances[tx.Sender]
-	if senderBalance < tx.Amount {
-		n.balanceMu.Unlock()
-		n.cacheResult(clientID, timestamp, false, pb.ResultType_INSUFFICIENT_BALANCE)
-		return false, fmt.Errorf("insufficient balance")
 	}
 	n.locks[tx.Sender] = &DataItemLock{
 		clientID:  clientID,
 		timestamp: timestamp,
 		lockedAt:  time.Now(),
+	}
+	n.lockMu.Unlock()
+
+	// Use balanceMu for balance operations
+	n.balanceMu.Lock()
+	senderBalance := n.balances[tx.Sender]
+	if senderBalance < tx.Amount {
+		n.balanceMu.Unlock()
+		// Release the lock we just acquired
+		n.lockMu.Lock()
+		delete(n.locks, tx.Sender)
+		n.lockMu.Unlock()
+		n.cacheResult(clientID, timestamp, false, pb.ResultType_INSUFFICIENT_BALANCE)
+		return false, fmt.Errorf("insufficient balance")
 	}
 
 	// Initialize 2PC state
@@ -279,12 +286,16 @@ func (n *Node) coordinatorAbort(txnID, clientID string, timestamp int64, partici
 // cleanup2PCCoordinator cleans up coordinator state (rollback if needed)
 func (n *Node) cleanup2PCCoordinator(txnID string, commit bool) {
 	n.balanceMu.Lock()
-	defer n.balanceMu.Unlock()
-
 	txState, exists := n.twoPCState.transactions[txnID]
 	if !exists {
+		n.balanceMu.Unlock()
 		return
 	}
+
+	// Copy values needed for lock release
+	clientID := txState.ClientID
+	lockedItems := make([]int32, len(txState.LockedItems))
+	copy(lockedItems, txState.LockedItems)
 
 	if !commit && len(txState.WALEntries) > 0 {
 		// ROLLBACK: Restore old balances from WAL
@@ -296,17 +307,20 @@ func (n *Node) cleanup2PCCoordinator(txnID string, commit bool) {
 		}
 	}
 
-	// Release locks
-	for _, itemID := range txState.LockedItems {
+	// Delete transaction state (under balanceMu since twoPCState is protected by it)
+	delete(n.twoPCState.transactions, txnID)
+	n.balanceMu.Unlock()
+
+	// Release locks (use lockMu for lock operations)
+	n.lockMu.Lock()
+	for _, itemID := range lockedItems {
 		lock, exists := n.locks[itemID]
-		if exists && lock.clientID == txState.ClientID {
+		if exists && lock.clientID == clientID {
 			log.Printf("Node %d: 2PC[%s]: 🔓 Releasing lock on item %d", n.id, txnID, itemID)
 			delete(n.locks, itemID)
 		}
 	}
-
-	// Delete transaction state
-	delete(n.twoPCState.transactions, txnID)
+	n.lockMu.Unlock()
 }
 
 // ============================================================================
@@ -333,12 +347,11 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	n.balanceMu.Lock()
-
-	// Check if receiver item is locked
+	// Use lockMu for lock operations (consistent with acquireLock/releaseLock)
+	n.lockMu.Lock()
 	receiverLock, receiverLocked := n.locks[tx.Receiver]
 	if receiverLocked && receiverLock.clientID != req.ClientId {
-		n.balanceMu.Unlock()
+		n.lockMu.Unlock()
 		log.Printf("Node %d: 2PC[%s]: ❌ PREPARE REJECTED - receiver item %d locked by %s (sending ABORT to coordinator)",
 			n.id, txnID, tx.Receiver, receiverLock.clientID)
 
@@ -353,13 +366,17 @@ func (n *Node) TwoPCPrepare(ctx context.Context, req *pb.TwoPCPrepareRequest) (*
 		}, nil
 	}
 
-	// Lock receiver item and save old balance to WAL
-	receiverBalance := n.balances[tx.Receiver]
+	// Lock receiver item
 	n.locks[tx.Receiver] = &DataItemLock{
 		clientID:  req.ClientId,
 		timestamp: req.Timestamp,
 		lockedAt:  time.Now(),
 	}
+	n.lockMu.Unlock()
+
+	// Use balanceMu for balance operations
+	n.balanceMu.Lock()
+	receiverBalance := n.balances[tx.Receiver]
 
 	if n.twoPCState.transactions == nil {
 		n.twoPCState.transactions = make(map[string]*TwoPCTransaction)
@@ -519,12 +536,16 @@ func (n *Node) TwoPCAbort(ctx context.Context, req *pb.TwoPCAbortRequest) (*pb.T
 // cleanup2PCParticipant cleans up participant state (rollback if needed)
 func (n *Node) cleanup2PCParticipant(txnID string, commit bool) {
 	n.balanceMu.Lock()
-	defer n.balanceMu.Unlock()
-
 	txState, exists := n.twoPCState.transactions[txnID]
 	if !exists {
+		n.balanceMu.Unlock()
 		return
 	}
+
+	// Copy values needed for lock release
+	clientID := txState.ClientID
+	lockedItems := make([]int32, len(txState.LockedItems))
+	copy(lockedItems, txState.LockedItems)
 
 	if !commit && len(txState.WALEntries) > 0 {
 		// ROLLBACK: Restore old balances from WAL
@@ -536,17 +557,20 @@ func (n *Node) cleanup2PCParticipant(txnID string, commit bool) {
 		}
 	}
 
-	// Release locks
-	for _, itemID := range txState.LockedItems {
+	// Delete transaction state and WAL entries (under balanceMu since twoPCState is protected by it)
+	delete(n.twoPCState.transactions, txnID)
+	n.balanceMu.Unlock()
+
+	// Release locks (use lockMu for lock operations)
+	n.lockMu.Lock()
+	for _, itemID := range lockedItems {
 		lock, exists := n.locks[itemID]
-		if exists && lock.clientID == txState.ClientID {
+		if exists && lock.clientID == clientID {
 			log.Printf("Node %d: 2PC[%s]: 🔓 Releasing lock on item %d", n.id, txnID, itemID)
 			delete(n.locks, itemID)
 		}
 	}
-
-	// Delete transaction state and WAL entries
-	delete(n.twoPCState.transactions, txnID)
+	n.lockMu.Unlock()
 }
 
 // ============================================================================
@@ -565,26 +589,36 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 	clientID := entry.Request.ClientId
 	timestamp := entry.Request.Timestamp
 
+	// Determine which item(s) this node is responsible for
+	senderCluster := n.config.GetClusterForDataItem(tx.Sender)
+	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+
 	switch phase {
 	case "P": // PREPARE phase - save to WAL and acquire locks (for all replicas including followers)
+		// First, save balance to WAL under balanceMu
 		n.balanceMu.Lock()
-
-		// Initialize WAL for this transaction if needed
 		if n.twoPCWAL[txnID] == nil {
 			n.twoPCWAL[txnID] = make(map[int32]int32)
 		}
 
-		// Determine which item(s) this node is responsible for
-		senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-		receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-
 		if int(n.clusterID) == senderCluster {
-			// This node handles sender - save sender's old balance and acquire lock
 			oldBalance := n.balances[tx.Sender]
 			n.twoPCWAL[txnID][tx.Sender] = oldBalance
+			log.Printf("Node %d: 2PC[%s] PREPARE: Saved sender WAL[%d]=%d",
+				n.id, txnID, tx.Sender, oldBalance)
+		}
 
-			// LOCK REPLICATION: Acquire lock on follower (leader already has it)
-			// This ensures new leader knows about locks after failover
+		if int(n.clusterID) == receiverCluster {
+			oldBalance := n.balances[tx.Receiver]
+			n.twoPCWAL[txnID][tx.Receiver] = oldBalance
+			log.Printf("Node %d: 2PC[%s] PREPARE: Saved receiver WAL[%d]=%d",
+				n.id, txnID, tx.Receiver, oldBalance)
+		}
+		n.balanceMu.Unlock()
+
+		// Then, acquire locks under lockMu (LOCK REPLICATION for followers)
+		n.lockMu.Lock()
+		if int(n.clusterID) == senderCluster {
 			if _, locked := n.locks[tx.Sender]; !locked {
 				n.locks[tx.Sender] = &DataItemLock{
 					clientID:  clientID,
@@ -594,17 +628,9 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 				log.Printf("Node %d: 2PC[%s] PREPARE: Acquired lock on sender %d (replica)",
 					n.id, txnID, tx.Sender)
 			}
-
-			log.Printf("Node %d: 2PC[%s] PREPARE: Saved sender WAL[%d]=%d",
-				n.id, txnID, tx.Sender, oldBalance)
 		}
 
 		if int(n.clusterID) == receiverCluster {
-			// This node handles receiver - save receiver's old balance and acquire lock
-			oldBalance := n.balances[tx.Receiver]
-			n.twoPCWAL[txnID][tx.Receiver] = oldBalance
-
-			// LOCK REPLICATION: Acquire lock on follower (leader already has it)
 			if _, locked := n.locks[tx.Receiver]; !locked {
 				n.locks[tx.Receiver] = &DataItemLock{
 					clientID:  clientID,
@@ -614,21 +640,20 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 				log.Printf("Node %d: 2PC[%s] PREPARE: Acquired lock on receiver %d (replica)",
 					n.id, txnID, tx.Receiver)
 			}
-
-			log.Printf("Node %d: 2PC[%s] PREPARE: Saved receiver WAL[%d]=%d",
-				n.id, txnID, tx.Receiver, oldBalance)
 		}
-
-		n.balanceMu.Unlock()
+		n.lockMu.Unlock()
 
 	case "C": // COMMIT phase - delete WAL and release locks
+		// Delete WAL under balanceMu
 		n.balanceMu.Lock()
+		if _, exists := n.twoPCWAL[txnID]; exists {
+			delete(n.twoPCWAL, txnID)
+			log.Printf("Node %d: 2PC[%s] COMMIT: Deleted WAL (changes committed)", n.id, txnID)
+		}
+		n.balanceMu.Unlock()
 
-		// Determine which item(s) this node is responsible for
-		senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-		receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-
-		// Release locks
+		// Release locks under lockMu
+		n.lockMu.Lock()
 		if int(n.clusterID) == senderCluster {
 			if lock, exists := n.locks[tx.Sender]; exists && lock.clientID == clientID {
 				delete(n.locks, tx.Sender)
@@ -643,22 +668,11 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 					n.id, txnID, tx.Receiver)
 			}
 		}
-
-		// Delete WAL
-		if _, exists := n.twoPCWAL[txnID]; exists {
-			delete(n.twoPCWAL, txnID)
-			log.Printf("Node %d: 2PC[%s] COMMIT: Deleted WAL (changes committed)", n.id, txnID)
-		}
-		n.balanceMu.Unlock()
+		n.lockMu.Unlock()
 
 	case "A": // ABORT phase - rollback using WAL and release locks
+		// Rollback balances under balanceMu
 		n.balanceMu.Lock()
-
-		// Determine which item(s) this node is responsible for
-		senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-		receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-
-		// Rollback using WAL
 		if walEntries, exists := n.twoPCWAL[txnID]; exists {
 			log.Printf("Node %d: 2PC[%s] ABORT: Rolling back %d items", n.id, txnID, len(walEntries))
 
@@ -671,8 +685,10 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 
 			delete(n.twoPCWAL, txnID)
 		}
+		n.balanceMu.Unlock()
 
-		// Release locks
+		// Release locks under lockMu
+		n.lockMu.Lock()
 		if int(n.clusterID) == senderCluster {
 			if lock, exists := n.locks[tx.Sender]; exists && lock.clientID == clientID {
 				delete(n.locks, tx.Sender)
@@ -687,8 +703,7 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 					n.id, txnID, tx.Receiver)
 			}
 		}
-
-		n.balanceMu.Unlock()
+		n.lockMu.Unlock()
 	}
 }
 
