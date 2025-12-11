@@ -47,8 +47,8 @@ func (n *Node) TwoPCCoordinator(tx *pb.Transaction, clientID string, timestamp i
 
 	log.Printf("Node %d: 2PC[%s] %d→%d:%d", n.id, txnID, tx.Sender, tx.Receiver, tx.Amount)
 
-	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
+	receiverCluster := n.getClusterForDataItem(tx.Receiver)
+	receiverLeader := n.config.GetLeaderNodeForCluster(int(receiverCluster))
 
 	// Use lockMu for lock operations (consistent with acquireLock/releaseLock)
 	n.lockMu.Lock()
@@ -589,9 +589,9 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 	clientID := entry.Request.ClientId
 	timestamp := entry.Request.Timestamp
 
-	// Determine which item(s) this node is responsible for
-	senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+	// Determine which item(s) this node is responsible for (migration-aware)
+	senderCluster := n.getClusterForDataItem(tx.Sender)
+	receiverCluster := n.getClusterForDataItem(tx.Receiver)
 
 	switch phase {
 	case "P": // PREPARE phase - save to WAL and acquire locks (for all replicas including followers)
@@ -601,14 +601,14 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 			n.twoPCWAL[txnID] = make(map[int32]int32)
 		}
 
-		if int(n.clusterID) == senderCluster {
+		if n.clusterID == senderCluster {
 			oldBalance := n.balances[tx.Sender]
 			n.twoPCWAL[txnID][tx.Sender] = oldBalance
 			log.Printf("Node %d: 2PC[%s] PREPARE: Saved sender WAL[%d]=%d",
 				n.id, txnID, tx.Sender, oldBalance)
 		}
 
-		if int(n.clusterID) == receiverCluster {
+		if n.clusterID == receiverCluster {
 			oldBalance := n.balances[tx.Receiver]
 			n.twoPCWAL[txnID][tx.Receiver] = oldBalance
 			log.Printf("Node %d: 2PC[%s] PREPARE: Saved receiver WAL[%d]=%d",
@@ -618,7 +618,7 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 
 		// Then, acquire locks under lockMu (LOCK REPLICATION for followers)
 		n.lockMu.Lock()
-		if int(n.clusterID) == senderCluster {
+		if n.clusterID == senderCluster {
 			if _, locked := n.locks[tx.Sender]; !locked {
 				n.locks[tx.Sender] = &DataItemLock{
 					clientID:  clientID,
@@ -630,7 +630,7 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 			}
 		}
 
-		if int(n.clusterID) == receiverCluster {
+		if n.clusterID == receiverCluster {
 			if _, locked := n.locks[tx.Receiver]; !locked {
 				n.locks[tx.Receiver] = &DataItemLock{
 					clientID:  clientID,
@@ -654,14 +654,14 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 
 		// Release locks under lockMu
 		n.lockMu.Lock()
-		if int(n.clusterID) == senderCluster {
+		if n.clusterID == senderCluster {
 			if lock, exists := n.locks[tx.Sender]; exists && lock.clientID == clientID {
 				delete(n.locks, tx.Sender)
 				log.Printf("Node %d: 2PC[%s] COMMIT: Released lock on sender %d (replica)",
 					n.id, txnID, tx.Sender)
 			}
 		}
-		if int(n.clusterID) == receiverCluster {
+		if n.clusterID == receiverCluster {
 			if lock, exists := n.locks[tx.Receiver]; exists && lock.clientID == clientID {
 				delete(n.locks, tx.Receiver)
 				log.Printf("Node %d: 2PC[%s] COMMIT: Released lock on receiver %d (replica)",
@@ -689,14 +689,14 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 
 		// Release locks under lockMu
 		n.lockMu.Lock()
-		if int(n.clusterID) == senderCluster {
+		if n.clusterID == senderCluster {
 			if lock, exists := n.locks[tx.Sender]; exists && lock.clientID == clientID {
 				delete(n.locks, tx.Sender)
 				log.Printf("Node %d: 2PC[%s] ABORT: Released lock on sender %d (replica)",
 					n.id, txnID, tx.Sender)
 			}
 		}
-		if int(n.clusterID) == receiverCluster {
+		if n.clusterID == receiverCluster {
 			if lock, exists := n.locks[tx.Receiver]; exists && lock.clientID == clientID {
 				delete(n.locks, tx.Receiver)
 				log.Printf("Node %d: 2PC[%s] ABORT: Released lock on receiver %d (replica)",
@@ -759,13 +759,13 @@ func (n *Node) findIncomplete2PCTransactions() []*types.LogEntry {
 
 		tx := entry.Request.Transaction
 		// Only process cross-shard transactions where we are the sender cluster (coordinator)
-		senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-		receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+		senderCluster := n.getClusterForDataItem(tx.Sender)
+		receiverCluster := n.getClusterForDataItem(tx.Receiver)
 
 		if senderCluster == receiverCluster {
 			continue // Intra-shard, not 2PC
 		}
-		if int(n.clusterID) != senderCluster {
+		if n.clusterID != senderCluster {
 			continue // We're not the coordinator
 		}
 
@@ -810,9 +810,9 @@ func (n *Node) resume2PCTransaction(entry *types.LogEntry) {
 
 	log.Printf("Node %d: 🔄 Resuming 2PC[%s]: %d → %d", n.id, txnID, tx.Sender, tx.Receiver)
 
-	// Get participant cluster info
-	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
+	// Get participant cluster info (migration-aware)
+	receiverCluster := n.getClusterForDataItem(tx.Receiver)
+	receiverLeader := n.config.GetLeaderNodeForCluster(int(receiverCluster))
 
 	// Get connection to participant
 	receiverClient, err := n.getCrossClusterClient(int32(receiverLeader))
@@ -935,8 +935,8 @@ func (n *Node) abortRecovered2PC(entry *types.LogEntry, reason string) {
 	}
 
 	// Send ABORT to participant (best effort)
-	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
-	receiverLeader := n.config.GetLeaderNodeForCluster(receiverCluster)
+	receiverCluster := n.getClusterForDataItem(tx.Receiver)
+	receiverLeader := n.config.GetLeaderNodeForCluster(int(receiverCluster))
 
 	if receiverClient, err := n.getCrossClusterClient(int32(receiverLeader)); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

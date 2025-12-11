@@ -529,6 +529,7 @@ message FlushStateRequest {
   bool reset_database = 1;           // Reset database to initial state
   bool reset_logs = 2;               // Clear Paxos logs
   bool reset_ballot = 3;             // Reset ballot to initial
+  bool reset_access_tracker = 4;     // Reset access tracker (resharding data) - defaults to true for backward compat
 }
 
 message FlushStateReply {

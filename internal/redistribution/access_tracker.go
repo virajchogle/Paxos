@@ -1,6 +1,8 @@
 package redistribution
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -257,4 +259,133 @@ type AccessStats struct {
 	UniqueItemsAccessed    int64
 	TrackingSince          time.Time
 	LastReset              time.Time
+}
+
+// ============================================================================
+// PERSISTENCE - Serialize/Deserialize for disk storage
+// ============================================================================
+
+// AccessTrackerState is the serializable state of the AccessTracker
+type AccessTrackerState struct {
+	CoAccessCount      map[string]int64        `json:"co_access_count"` // "itemA-itemB" -> count
+	ItemAccessCount    map[int32]int64         `json:"item_access_count"`
+	TransactionHistory []TransactionRecordJSON `json:"transaction_history"`
+	HistoryWindowSize  int                     `json:"history_window_size"`
+	StartTime          time.Time               `json:"start_time"`
+	LastReset          time.Time               `json:"last_reset"`
+}
+
+// TransactionRecordJSON is the JSON-serializable version of TransactionRecord
+type TransactionRecordJSON struct {
+	Sender    int32     `json:"sender"`
+	Receiver  int32     `json:"receiver"`
+	Timestamp time.Time `json:"timestamp"`
+	IsCross   bool      `json:"is_cross"`
+}
+
+// Serialize converts the AccessTracker state to JSON bytes
+func (at *AccessTracker) Serialize() ([]byte, error) {
+	at.mu.RLock()
+	defer at.mu.RUnlock()
+
+	// Convert co-access map to string keys for JSON
+	coAccessStr := make(map[string]int64, len(at.coAccessCount))
+	for pair, count := range at.coAccessCount {
+		key := itemPairToString(pair)
+		coAccessStr[key] = count
+	}
+
+	// Convert transaction history
+	history := make([]TransactionRecordJSON, len(at.transactionHistory))
+	for i, rec := range at.transactionHistory {
+		history[i] = TransactionRecordJSON{
+			Sender:    rec.Sender,
+			Receiver:  rec.Receiver,
+			Timestamp: rec.Timestamp,
+			IsCross:   rec.IsCross,
+		}
+	}
+
+	state := AccessTrackerState{
+		CoAccessCount:      coAccessStr,
+		ItemAccessCount:    at.itemAccessCount,
+		TransactionHistory: history,
+		HistoryWindowSize:  at.historyWindowSize,
+		StartTime:          at.startTime,
+		LastReset:          at.lastReset,
+	}
+
+	return json.Marshal(state)
+}
+
+// Deserialize restores the AccessTracker state from JSON bytes
+func (at *AccessTracker) Deserialize(data []byte) error {
+	var state AccessTrackerState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+
+	at.mu.Lock()
+	defer at.mu.Unlock()
+
+	// Convert string keys back to ItemPair
+	at.coAccessCount = make(map[ItemPair]int64, len(state.CoAccessCount))
+	for key, count := range state.CoAccessCount {
+		pair := stringToItemPair(key)
+		at.coAccessCount[pair] = count
+	}
+
+	// Copy item access count
+	at.itemAccessCount = make(map[int32]int64, len(state.ItemAccessCount))
+	for k, v := range state.ItemAccessCount {
+		at.itemAccessCount[k] = v
+	}
+
+	// Convert transaction history
+	at.transactionHistory = make([]*TransactionRecord, len(state.TransactionHistory))
+	for i, rec := range state.TransactionHistory {
+		at.transactionHistory[i] = &TransactionRecord{
+			Sender:    rec.Sender,
+			Receiver:  rec.Receiver,
+			Timestamp: rec.Timestamp,
+			IsCross:   rec.IsCross,
+		}
+	}
+
+	at.historyWindowSize = state.HistoryWindowSize
+	at.startTime = state.StartTime
+	at.lastReset = state.LastReset
+
+	return nil
+}
+
+// itemPairToString converts an ItemPair to a string key
+func itemPairToString(pair ItemPair) string {
+	return fmt.Sprintf("%d-%d", pair.First, pair.Second)
+}
+
+// stringToItemPair converts a string key back to an ItemPair
+func stringToItemPair(key string) ItemPair {
+	var first, second int32
+	fmt.Sscanf(key, "%d-%d", &first, &second)
+	return NewItemPair(first, second)
+}
+
+// GetTransactionCount returns the number of recorded transactions
+func (at *AccessTracker) GetTransactionCount() int {
+	at.mu.RLock()
+	defer at.mu.RUnlock()
+	return len(at.transactionHistory)
+}
+
+// GetTransactionHistory returns a copy of the transaction history
+func (at *AccessTracker) GetTransactionHistory() []TransactionRecord {
+	at.mu.RLock()
+	defer at.mu.RUnlock()
+
+	result := make([]TransactionRecord, len(at.transactionHistory))
+	for i, rec := range at.transactionHistory {
+		result[i] = *rec
+	}
+	return result
 }

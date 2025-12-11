@@ -40,6 +40,10 @@ func (n *Node) initMigration() {
 
 	if n.accessTracker == nil {
 		n.accessTracker = redistribution.NewAccessTracker(100000)
+		// Try to load persisted access tracker data
+		if err := n.loadAccessTrackerUnlocked(); err != nil {
+			log.Printf("Node %d: No persisted access tracker data (starting fresh)", n.id)
+		}
 	}
 }
 
@@ -49,6 +53,15 @@ func (n *Node) RecordTransactionAccess(sender, receiver int32, isCross bool) {
 		return
 	}
 	n.accessTracker.RecordTransaction(sender, receiver, isCross)
+
+	// Persist access tracker periodically (every 100 transactions) to avoid excessive writes
+	if n.accessTracker.GetTransactionCount()%100 == 0 {
+		go func() {
+			if err := n.saveAccessTracker(); err != nil {
+				log.Printf("Node %d: Warning - failed to save access tracker: %v", n.id, err)
+			}
+		}()
+	}
 }
 
 func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareRequest) (*pb.MigrationPrepareReply, error) {
@@ -105,34 +118,12 @@ func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareReq
 }
 
 // MigrationGetData retrieves data for items being migrated
+// SIMPLIFIED: Just retrieves data without requiring prepare state
 func (n *Node) MigrationGetData(ctx context.Context, req *pb.MigrationGetDataRequest) (*pb.MigrationGetDataReply, error) {
 	log.Printf("Node %d: 📤 MigrationGetData - migration %s, %d items",
 		n.id, req.MigrationId, len(req.ItemIds))
 
-	n.initMigration()
-
-	// Verify migration exists
-	n.migrationState.mu.RLock()
-	migration, exists := n.migrationState.activeMigrations[req.MigrationId]
-	n.migrationState.mu.RUnlock()
-
-	if !exists {
-		return &pb.MigrationGetDataReply{
-			Success:     false,
-			MigrationId: req.MigrationId,
-			Message:     "migration not found",
-		}, nil
-	}
-
-	if migration.Status != "prepared" {
-		return &pb.MigrationGetDataReply{
-			Success:     false,
-			MigrationId: req.MigrationId,
-			Message:     fmt.Sprintf("migration not in prepared state (current: %s)", migration.Status),
-		}, nil
-	}
-
-	// Get item data
+	// Get item data directly
 	items := make([]*pb.MigrationDataItem, 0, len(req.ItemIds))
 	n.balanceMu.RLock()
 	for _, itemID := range req.ItemIds {
@@ -156,42 +147,41 @@ func (n *Node) MigrationGetData(ctx context.Context, req *pb.MigrationGetDataReq
 }
 
 // MigrationSetData stores data items from a migration
+// SIMPLIFIED: Directly adds items to balances and tracks as migrated
 func (n *Node) MigrationSetData(ctx context.Context, req *pb.MigrationSetDataRequest) (*pb.MigrationSetDataReply, error) {
 	log.Printf("Node %d: 📥 MigrationSetData - migration %s, %d items from cluster %d",
 		n.id, req.MigrationId, len(req.Items), req.SourceCluster)
 
 	n.initMigration()
 
-	n.migrationState.mu.Lock()
-
-	// Create or get migration record
-	migration, exists := n.migrationState.activeMigrations[req.MigrationId]
-	if !exists {
-		migration = &ActiveMigration{
-			ID:            req.MigrationId,
-			StartTime:     time.Now(),
-			Role:          "target",
-			Items:         make([]int32, 0),
-			ReceivedItems: make(map[int32]int32),
-			Status:        "receiving",
-		}
-		n.migrationState.activeMigrations[req.MigrationId] = migration
+	// Directly add items to balances and track as migrated
+	n.balanceMu.Lock()
+	if n.migratedInItems == nil {
+		n.migratedInItems = make(map[int32]bool)
 	}
-
-	// Store items temporarily (not in main DB yet)
 	for _, item := range req.Items {
-		migration.ReceivedItems[item.ItemId] = item.Balance
-		migration.Items = append(migration.Items, item.ItemId)
+		n.balances[item.ItemId] = item.Balance
+		n.migratedInItems[item.ItemId] = true
+		log.Printf("Node %d: 📦 Added migrated item %d with balance %d", n.id, item.ItemId, item.Balance)
+	}
+	n.balanceMu.Unlock()
+
+	// Persist to database
+	if err := n.saveDatabase(); err != nil {
+		log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
 	}
 
-	n.migrationState.mu.Unlock()
+	// Persist migrated items tracking
+	if err := n.saveMigratedInItems(); err != nil {
+		log.Printf("Node %d: Warning - failed to save migratedInItems: %v", n.id, err)
+	}
 
-	log.Printf("Node %d: ✅ Received %d items for migration %s", n.id, len(req.Items), req.MigrationId)
+	log.Printf("Node %d: ✅ Migrated %d items for migration %s", n.id, len(req.Items), req.MigrationId)
 
 	return &pb.MigrationSetDataReply{
 		Success:     true,
 		MigrationId: req.MigrationId,
-		Message:     fmt.Sprintf("received %d items", len(req.Items)),
+		Message:     fmt.Sprintf("migrated %d items", len(req.Items)),
 	}, nil
 }
 
@@ -216,10 +206,14 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 	n.migrationState.mu.Unlock()
 
 	if role == "source" {
-		// Source: Remove items from local database
+		// Source: Remove items from local database AND track as migrated out
 		n.balanceMu.Lock()
+		if n.migratedOutItems == nil {
+			n.migratedOutItems = make(map[int32]bool)
+		}
 		for _, itemID := range migration.Items {
 			delete(n.balances, itemID)
+			n.migratedOutItems[itemID] = true // Track as migrated out
 			log.Printf("Node %d: Removed item %d (migrated out)", n.id, itemID)
 		}
 		n.balanceMu.Unlock()
@@ -229,11 +223,20 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 			log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
 		}
 
+		// Save migrated out items tracking
+		if err := n.saveMigratedOutItems(); err != nil {
+			log.Printf("Node %d: Warning - failed to save migratedOutItems: %v", n.id, err)
+		}
+
 	} else if role == "target" {
-		// Target: Move received items to main database
+		// Target: Move received items to main database AND track as migrated
 		n.balanceMu.Lock()
+		if n.migratedInItems == nil {
+			n.migratedInItems = make(map[int32]bool)
+		}
 		for itemID, balance := range migration.ReceivedItems {
 			n.balances[itemID] = balance
+			n.migratedInItems[itemID] = true // Track as migrated in
 			log.Printf("Node %d: Added item %d with balance %d (migrated in)", n.id, itemID, balance)
 		}
 		n.balanceMu.Unlock()
@@ -241,6 +244,11 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 		// Save database
 		if err := n.saveDatabase(); err != nil {
 			log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
+		}
+
+		// Save migrated items tracking
+		if err := n.saveMigratedInItems(); err != nil {
+			log.Printf("Node %d: Warning - failed to save migratedInItems: %v", n.id, err)
 		}
 	}
 
@@ -372,10 +380,10 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 
 	graph := redistribution.NewSimpleGraph(numClusters, 0)
 
-	// Add vertices for all items in local shard
+	// Add vertices for all items in local shard (migration-aware)
 	itemAccess := n.accessTracker.GetItemAccessMap()
 	for itemID, count := range itemAccess {
-		currentCluster := int32(n.config.GetClusterForDataItem(itemID))
+		currentCluster := n.getClusterForDataItem(itemID)
 		graph.AddVertex(itemID, count, currentCluster)
 	}
 
@@ -473,10 +481,10 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 
 	graph := redistribution.NewSimpleGraph(numClusters, totalItems)
 
-	// Add vertices for all items
+	// Add vertices for all items (migration-aware)
 	itemAccess := n.accessTracker.GetItemAccessMap()
 	for itemID, count := range itemAccess {
-		currentCluster := int32(n.config.GetClusterForDataItem(itemID))
+		currentCluster := n.getClusterForDataItem(itemID)
 		graph.AddVertex(itemID, count, currentCluster)
 	}
 
@@ -540,4 +548,289 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 		Triplets: triplets,
 		Message:  message,
 	}, nil
+}
+
+// ============================================================================
+// ACCESS TRACKER PERSISTENCE
+// ============================================================================
+
+const accessTrackerKey = "access_tracker_state"
+
+// saveAccessTracker persists the access tracker state to PebbleDB
+func (n *Node) saveAccessTracker() error {
+	if n.accessTracker == nil || n.pebbleDB == nil {
+		return nil
+	}
+
+	data, err := n.accessTracker.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize access tracker: %w", err)
+	}
+
+	// Write to PebbleDB
+	key := []byte(accessTrackerKey)
+	if err := n.pebbleDB.Set(key, data, nil); err != nil {
+		return fmt.Errorf("failed to save access tracker to PebbleDB: %w", err)
+	}
+
+	log.Printf("Node %d: 💾 Saved access tracker state (%d bytes, %d transactions)",
+		n.id, len(data), n.accessTracker.GetTransactionCount())
+	return nil
+}
+
+// loadAccessTracker loads the access tracker state from PebbleDB
+func (n *Node) loadAccessTracker() error {
+	n.balanceMu.Lock()
+	defer n.balanceMu.Unlock()
+	return n.loadAccessTrackerUnlocked()
+}
+
+// loadAccessTrackerUnlocked loads access tracker without acquiring balanceMu (caller must hold lock)
+func (n *Node) loadAccessTrackerUnlocked() error {
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
+	}
+
+	key := []byte(accessTrackerKey)
+	data, closer, err := n.pebbleDB.Get(key)
+	if err != nil {
+		return fmt.Errorf("failed to get access tracker from PebbleDB: %w", err)
+	}
+	defer closer.Close()
+
+	// Make a copy since data is only valid until closer.Close()
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	if n.accessTracker == nil {
+		n.accessTracker = redistribution.NewAccessTracker(100000)
+	}
+
+	if err := n.accessTracker.Deserialize(dataCopy); err != nil {
+		return fmt.Errorf("failed to deserialize access tracker: %w", err)
+	}
+
+	log.Printf("Node %d: ✅ Loaded access tracker state (%d transactions)",
+		n.id, n.accessTracker.GetTransactionCount())
+	return nil
+}
+
+// clearAccessTrackerFromDB removes the access tracker state from PebbleDB
+func (n *Node) clearAccessTrackerFromDB() error {
+	if n.pebbleDB == nil {
+		return nil
+	}
+
+	key := []byte(accessTrackerKey)
+	if err := n.pebbleDB.Delete(key, nil); err != nil {
+		// Ignore "not found" errors
+		return nil
+	}
+
+	log.Printf("Node %d: 🗑️  Cleared access tracker from PebbleDB", n.id)
+	return nil
+}
+
+// ============================================================================
+// MIGRATED ITEMS PERSISTENCE
+// ============================================================================
+
+const migratedInItemsKey = "migrated_in_items"
+
+// saveMigratedInItems persists the migratedInItems map to PebbleDB
+func (n *Node) saveMigratedInItems() error {
+	if n.pebbleDB == nil {
+		return nil
+	}
+
+	n.balanceMu.RLock()
+	items := make([]int32, 0, len(n.migratedInItems))
+	for itemID := range n.migratedInItems {
+		items = append(items, itemID)
+	}
+	n.balanceMu.RUnlock()
+
+	// Serialize as comma-separated values
+	var data string
+	for i, itemID := range items {
+		if i > 0 {
+			data += ","
+		}
+		data += fmt.Sprintf("%d", itemID)
+	}
+
+	key := []byte(migratedInItemsKey)
+	if err := n.pebbleDB.Set(key, []byte(data), nil); err != nil {
+		return fmt.Errorf("failed to save migratedInItems: %w", err)
+	}
+
+	log.Printf("Node %d: 💾 Saved %d migrated items", n.id, len(items))
+	return nil
+}
+
+// loadMigratedInItems loads the migratedInItems map from PebbleDB
+func (n *Node) loadMigratedInItems() error {
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
+	}
+
+	key := []byte(migratedInItemsKey)
+	data, closer, err := n.pebbleDB.Get(key)
+	if err != nil {
+		return err // Not found is fine
+	}
+	defer closer.Close()
+
+	n.balanceMu.Lock()
+	defer n.balanceMu.Unlock()
+
+	if n.migratedInItems == nil {
+		n.migratedInItems = make(map[int32]bool)
+	}
+
+	// Parse comma-separated values
+	dataStr := string(data)
+	if dataStr == "" {
+		return nil
+	}
+
+	for _, part := range splitCSV(dataStr) {
+		var itemID int32
+		if _, err := fmt.Sscanf(part, "%d", &itemID); err == nil {
+			n.migratedInItems[itemID] = true
+		}
+	}
+
+	log.Printf("Node %d: ✅ Loaded %d migrated items", n.id, len(n.migratedInItems))
+	return nil
+}
+
+// splitCSV splits a comma-separated string
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	result := make([]string, 0)
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			result = append(result, s[start:i])
+			start = i + 1
+		}
+	}
+	return result
+}
+
+// clearMigratedInItems clears the migratedInItems from memory and PebbleDB
+func (n *Node) clearMigratedInItems() error {
+	n.balanceMu.Lock()
+	n.migratedInItems = make(map[int32]bool)
+	n.balanceMu.Unlock()
+
+	if n.pebbleDB == nil {
+		return nil
+	}
+
+	key := []byte(migratedInItemsKey)
+	if err := n.pebbleDB.Delete(key, nil); err != nil {
+		// Ignore "not found" errors
+		return nil
+	}
+
+	log.Printf("Node %d: 🗑️  Cleared migrated-in items", n.id)
+	return nil
+}
+
+// ============================================================================
+// MIGRATED OUT ITEMS PERSISTENCE
+// ============================================================================
+
+const migratedOutItemsKey = "migrated_out_items"
+
+// saveMigratedOutItems persists the migratedOutItems map to PebbleDB
+func (n *Node) saveMigratedOutItems() error {
+	if n.pebbleDB == nil {
+		return nil
+	}
+
+	n.balanceMu.RLock()
+	items := make([]int32, 0, len(n.migratedOutItems))
+	for itemID := range n.migratedOutItems {
+		items = append(items, itemID)
+	}
+	n.balanceMu.RUnlock()
+
+	// Serialize as comma-separated values
+	var data string
+	for i, itemID := range items {
+		if i > 0 {
+			data += ","
+		}
+		data += fmt.Sprintf("%d", itemID)
+	}
+
+	key := []byte(migratedOutItemsKey)
+	if err := n.pebbleDB.Set(key, []byte(data), nil); err != nil {
+		return fmt.Errorf("failed to save migratedOutItems: %w", err)
+	}
+
+	log.Printf("Node %d: 💾 Saved %d migrated-out items", n.id, len(items))
+	return nil
+}
+
+// loadMigratedOutItems loads the migratedOutItems map from PebbleDB
+func (n *Node) loadMigratedOutItems() error {
+	if n.pebbleDB == nil {
+		return fmt.Errorf("PebbleDB not initialized")
+	}
+
+	key := []byte(migratedOutItemsKey)
+	data, closer, err := n.pebbleDB.Get(key)
+	if err != nil {
+		return err // Not found is fine
+	}
+	defer closer.Close()
+
+	n.balanceMu.Lock()
+	defer n.balanceMu.Unlock()
+
+	if n.migratedOutItems == nil {
+		n.migratedOutItems = make(map[int32]bool)
+	}
+
+	// Parse comma-separated values
+	dataStr := string(data)
+	if dataStr == "" {
+		return nil
+	}
+
+	for _, part := range splitCSV(dataStr) {
+		var itemID int32
+		if _, err := fmt.Sscanf(part, "%d", &itemID); err == nil {
+			n.migratedOutItems[itemID] = true
+		}
+	}
+
+	log.Printf("Node %d: ✅ Loaded %d migrated-out items", n.id, len(n.migratedOutItems))
+	return nil
+}
+
+// clearMigratedOutItems clears the migratedOutItems from memory and PebbleDB
+func (n *Node) clearMigratedOutItems() error {
+	n.balanceMu.Lock()
+	n.migratedOutItems = make(map[int32]bool)
+	n.balanceMu.Unlock()
+
+	if n.pebbleDB == nil {
+		return nil
+	}
+
+	key := []byte(migratedOutItemsKey)
+	if err := n.pebbleDB.Delete(key, nil); err != nil {
+		// Ignore "not found" errors
+		return nil
+	}
+
+	log.Printf("Node %d: 🗑️  Cleared migrated-out items", n.id)
+	return nil
 }

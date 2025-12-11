@@ -7,12 +7,11 @@
 package proto
 
 import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
-
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -641,7 +640,7 @@ type AcceptRequest struct {
 	SequenceNumber int32                  `protobuf:"varint,2,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	Request        *TransactionRequest    `protobuf:"bytes,3,opt,name=request,proto3" json:"request,omitempty"`
 	IsNoop         bool                   `protobuf:"varint,4,opt,name=is_noop,json=isNoop,proto3" json:"is_noop,omitempty"`
-	Phase          string                 `protobuf:"bytes,5,opt,name=phase,proto3" json:"phase,omitempty"` // 2PC phase
+	Phase          string                 `protobuf:"bytes,5,opt,name=phase,proto3" json:"phase,omitempty"` // 2PC phase: ""=normal, "P"=Prepare, "C"=Commit, "A"=Abort
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -786,7 +785,7 @@ type CommitRequest struct {
 	SequenceNumber int32                  `protobuf:"varint,2,opt,name=sequence_number,json=sequenceNumber,proto3" json:"sequence_number,omitempty"`
 	Request        *TransactionRequest    `protobuf:"bytes,3,opt,name=request,proto3" json:"request,omitempty"`
 	IsNoop         bool                   `protobuf:"varint,4,opt,name=is_noop,json=isNoop,proto3" json:"is_noop,omitempty"`
-	Phase          string                 `protobuf:"bytes,5,opt,name=phase,proto3" json:"phase,omitempty"` // 2PC phase
+	Phase          string                 `protobuf:"bytes,5,opt,name=phase,proto3" json:"phase,omitempty"` // 2PC phase: ""=normal, "P"=Prepare, "C"=Commit, "A"=Abort
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -4112,12 +4111,13 @@ func (x *PrintReshardReply) GetMessage() string {
 
 // FlushState - Reset all node state between test sets
 type FlushStateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ResetDatabase bool                   `protobuf:"varint,1,opt,name=reset_database,json=resetDatabase,proto3" json:"reset_database,omitempty"` // Reset database to initial state
-	ResetLogs     bool                   `protobuf:"varint,2,opt,name=reset_logs,json=resetLogs,proto3" json:"reset_logs,omitempty"`             // Clear Paxos logs
-	ResetBallot   bool                   `protobuf:"varint,3,opt,name=reset_ballot,json=resetBallot,proto3" json:"reset_ballot,omitempty"`       // Reset ballot to initial
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ResetDatabase      bool                   `protobuf:"varint,1,opt,name=reset_database,json=resetDatabase,proto3" json:"reset_database,omitempty"`                  // Reset database to initial state
+	ResetLogs          bool                   `protobuf:"varint,2,opt,name=reset_logs,json=resetLogs,proto3" json:"reset_logs,omitempty"`                              // Clear Paxos logs
+	ResetBallot        bool                   `protobuf:"varint,3,opt,name=reset_ballot,json=resetBallot,proto3" json:"reset_ballot,omitempty"`                        // Reset ballot to initial
+	ResetAccessTracker bool                   `protobuf:"varint,4,opt,name=reset_access_tracker,json=resetAccessTracker,proto3" json:"reset_access_tracker,omitempty"` // Reset access tracker (resharding data) - defaults to true for backward compat
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *FlushStateRequest) Reset() {
@@ -4167,6 +4167,13 @@ func (x *FlushStateRequest) GetResetLogs() bool {
 func (x *FlushStateRequest) GetResetBallot() bool {
 	if x != nil {
 		return x.ResetBallot
+	}
+	return false
+}
+
+func (x *FlushStateRequest) GetResetAccessTracker() bool {
+	if x != nil {
+		return x.ResetAccessTracker
 	}
 	return false
 }
@@ -4268,22 +4275,24 @@ const file_paxos_proto_rawDesc = "" +
 	"\n" +
 	"accept_log\x18\x03 \x03(\v2\x14.paxos.AcceptedEntryR\tacceptLog\x12\x17\n" +
 	"\anode_id\x18\x04 \x01(\x05R\x06nodeId\x12%\n" +
-	"\x0echeckpoint_seq\x18\x05 \x01(\x05R\rcheckpointSeq\"\xad\x01\n" +
+	"\x0echeckpoint_seq\x18\x05 \x01(\x05R\rcheckpointSeq\"\xc3\x01\n" +
 	"\rAcceptRequest\x12%\n" +
 	"\x06ballot\x18\x01 \x01(\v2\r.paxos.BallotR\x06ballot\x12'\n" +
 	"\x0fsequence_number\x18\x02 \x01(\x05R\x0esequenceNumber\x123\n" +
 	"\arequest\x18\x03 \x01(\v2\x19.paxos.TransactionRequestR\arequest\x12\x17\n" +
-	"\ais_noop\x18\x04 \x01(\bR\x06isNoop\"\x92\x01\n" +
+	"\ais_noop\x18\x04 \x01(\bR\x06isNoop\x12\x14\n" +
+	"\x05phase\x18\x05 \x01(\tR\x05phase\"\x92\x01\n" +
 	"\rAcceptedReply\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12%\n" +
 	"\x06ballot\x18\x02 \x01(\v2\r.paxos.BallotR\x06ballot\x12'\n" +
 	"\x0fsequence_number\x18\x03 \x01(\x05R\x0esequenceNumber\x12\x17\n" +
-	"\anode_id\x18\x04 \x01(\x05R\x06nodeId\"\xad\x01\n" +
+	"\anode_id\x18\x04 \x01(\x05R\x06nodeId\"\xc3\x01\n" +
 	"\rCommitRequest\x12%\n" +
 	"\x06ballot\x18\x01 \x01(\v2\r.paxos.BallotR\x06ballot\x12'\n" +
 	"\x0fsequence_number\x18\x02 \x01(\x05R\x0esequenceNumber\x123\n" +
 	"\arequest\x18\x03 \x01(\v2\x19.paxos.TransactionRequestR\arequest\x12\x17\n" +
-	"\ais_noop\x18\x04 \x01(\bR\x06isNoop\"'\n" +
+	"\ais_noop\x18\x04 \x01(\bR\x06isNoop\x12\x14\n" +
+	"\x05phase\x18\x05 \x01(\tR\x05phase\"'\n" +
 	"\vCommitReply\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"\x9d\x01\n" +
 	"\x0eNewViewRequest\x12%\n" +
@@ -4547,12 +4556,13 @@ const file_paxos_proto_rawDesc = "" +
 	"\x11PrintReshardReply\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x121\n" +
 	"\btriplets\x18\x02 \x03(\v2\x15.paxos.ReshardTripletR\btriplets\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"|\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\xae\x01\n" +
 	"\x11FlushStateRequest\x12%\n" +
 	"\x0ereset_database\x18\x01 \x01(\bR\rresetDatabase\x12\x1d\n" +
 	"\n" +
 	"reset_logs\x18\x02 \x01(\bR\tresetLogs\x12!\n" +
-	"\freset_ballot\x18\x03 \x01(\bR\vresetBallot\"E\n" +
+	"\freset_ballot\x18\x03 \x01(\bR\vresetBallot\x120\n" +
+	"\x14reset_access_tracker\x18\x04 \x01(\bR\x12resetAccessTracker\"E\n" +
 	"\x0fFlushStateReply\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage*?\n" +

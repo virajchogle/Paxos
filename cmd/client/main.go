@@ -207,7 +207,8 @@ func (m *ClientManager) runInteractive() {
 	fmt.Println("  printview      - PrintView function (NEW-VIEW messages)")
 	fmt.Println("  printreshard   - PrintReshard function (analyze and show triplets)")
 	fmt.Println("  executereshard - Execute resharding (actually move data items)")
-	fmt.Println("  flush          - Flush system state (reset all nodes)")
+	fmt.Println("  flush          - Flush system state (preserves resharding data)")
+	fmt.Println("  flushall       - Flush system state (clears resharding data)")
 	fmt.Println("  performance    - Get performance metrics from all nodes")
 	fmt.Println("  help           - Show this help")
 	fmt.Println("  quit           - Exit")
@@ -267,7 +268,9 @@ func (m *ClientManager) runInteractive() {
 		case "executereshard":
 			m.executeReshard()
 		case "flush":
-			m.flushAllNodes()
+			m.flushAllNodes(false) // Don't reset access tracker by default
+		case "flushall", "flushreshard":
+			m.flushAllNodes(true) // Reset everything including access tracker
 		case "performance", "perf":
 			m.performanceAllNodes()
 		case "help":
@@ -322,13 +325,15 @@ func (m *ClientManager) processNextSet() {
 		return
 	}
 
+	// Clear txnHistory at start of each test set - resharding only analyzes current set
 	m.txnHistoryMu.Lock()
 	m.txnHistory = nil
 	m.txnHistoryMu.Unlock()
 	m.resetClientMetrics()
 
 	// Always flush to ensure clean state (including test set 1)
-	m.flushAllNodes()
+	// Note: migratedItems persist across test sets (until flushall)
+	m.flushAllNodes(false)
 	time.Sleep(100 * time.Millisecond)
 
 	set := m.testSets[m.currentSet]
@@ -1100,9 +1105,12 @@ Commands:
   printview            - PrintView (NEW-VIEW messages)
   printreshard         - Analyze resharding
   executereshard       - Execute resharding
-  flush                - Reset system state
+  flush                - Reset system state (preserves resharding data)
+  flushall             - Reset system state (clears resharding data)
   performance          - Show metrics
-  quit                 - Exit`)
+  quit                 - Exit
+
+Note: Resharding data persists across test sets and flushes until 'flushall' is called.`)
 }
 
 // printBalanceAllNodes implements PrintBalance(id) - query all 3 nodes in the cluster
@@ -1113,8 +1121,8 @@ func (m *ClientManager) printBalanceAllNodes(dataItemIDStr string) {
 		return
 	}
 
-	// Determine which cluster owns this item
-	cluster := m.config.GetClusterForDataItem(dataItemID)
+	// Determine which cluster owns this item (checks migratedItems first)
+	cluster := m.getClusterForDataItem(dataItemID)
 	clusterNodes := m.config.GetNodesInCluster(int(cluster))
 
 	// Query all nodes in parallel
@@ -1527,11 +1535,30 @@ func (m *ClientManager) executeReshard() {
 		return
 	}
 
-	fmt.Printf("📦 Migrating %d items...\n\n", len(result.Moves))
+	// Filter to only high-value moves (gain >= 2) to reduce unnecessary migrations
+	const minGainThreshold = int64(2)
+	highValueMoves := make([]redistribution.SimpleMove, 0)
+	for _, move := range result.Moves {
+		if move.Gain >= minGainThreshold {
+			highValueMoves = append(highValueMoves, move)
+		}
+	}
+
+	if len(highValueMoves) == 0 {
+		fmt.Printf("ℹ️  %d moves suggested but none meet threshold (gain >= %d)\n", len(result.Moves), minGainThreshold)
+		fmt.Println("   Low-gain moves are skipped to avoid unnecessary migrations")
+		return
+	}
+
+	fmt.Printf("📦 Migrating %d high-value items (gain >= %d)...\n", len(highValueMoves), minGainThreshold)
+	if len(highValueMoves) < len(result.Moves) {
+		fmt.Printf("   (Skipping %d low-gain moves)\n", len(result.Moves)-len(highValueMoves))
+	}
+	fmt.Println()
 
 	// Group moves by source cluster
 	movesBySource := make(map[int32][]redistribution.SimpleMove)
-	for _, move := range result.Moves {
+	for _, move := range highValueMoves {
 		movesBySource[move.FromCluster] = append(movesBySource[move.FromCluster], move)
 	}
 
@@ -1607,46 +1634,48 @@ func (m *ClientManager) executeReshard() {
 			itemsByTarget[targetCluster] = append(itemsByTarget[targetCluster], item)
 		}
 
-		// Step 3: Send data to each target cluster
+		// Step 3: Send data to ALL nodes in each target cluster (not just leader)
+		// This ensures the migrated data is replicated across all nodes
 		allTargetsOK := true
 		for targetCluster, items := range itemsByTarget {
-			targetLeader := m.config.GetLeaderNodeForCluster(int(targetCluster))
-			targetClient := m.nodeClients[targetLeader]
-			if targetClient == nil {
-				fmt.Printf("  ❌ Target leader (node %d) not available\n", targetLeader)
-				allTargetsOK = false
-				continue
-			}
+			targetNodes := m.config.GetNodesInCluster(int(targetCluster))
 
-			setDataReq := &pb.MigrationSetDataRequest{
-				MigrationId:   migrationID,
-				SourceCluster: sourceCluster,
-				Items:         items,
-			}
+			// Send to all nodes in target cluster
+			for _, targetNodeID := range targetNodes {
+				targetClient := m.nodeClients[targetNodeID]
+				if targetClient == nil {
+					fmt.Printf("  ⚠️  Target node %d not available\n", targetNodeID)
+					continue // Try other nodes
+				}
 
-			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-			setDataResp, err := targetClient.MigrationSetData(ctx, setDataReq)
-			cancel()
+				setDataReq := &pb.MigrationSetDataRequest{
+					MigrationId:   migrationID,
+					SourceCluster: sourceCluster,
+					Items:         items,
+				}
 
-			if err != nil || !setDataResp.Success {
-				fmt.Printf("  ❌ SetData to cluster %d failed\n", targetCluster)
-				allTargetsOK = false
-				continue
-			}
+				ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				setDataResp, err := targetClient.MigrationSetData(ctx, setDataReq)
+				cancel()
 
-			// Step 4: Commit on target
-			commitReq := &pb.MigrationCommitRequest{
-				MigrationId: migrationID,
-				ClusterId:   targetCluster,
-			}
+				if err != nil || !setDataResp.Success {
+					fmt.Printf("  ⚠️  SetData to node %d failed\n", targetNodeID)
+					continue // Try other nodes
+				}
 
-			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-			_, err = targetClient.MigrationCommit(ctx, commitReq)
-			cancel()
+				// Commit on this target node
+				commitReq := &pb.MigrationCommitRequest{
+					MigrationId: migrationID,
+					ClusterId:   targetCluster,
+				}
 
-			if err != nil {
-				fmt.Printf("  ❌ Commit on cluster %d failed\n", targetCluster)
-				allTargetsOK = false
+				ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				_, err = targetClient.MigrationCommit(ctx, commitReq)
+				cancel()
+
+				if err != nil {
+					fmt.Printf("  ⚠️  Commit on node %d failed\n", targetNodeID)
+				}
 			}
 		}
 
@@ -1663,20 +1692,27 @@ func (m *ClientManager) executeReshard() {
 			continue
 		}
 
-		// Step 5: Commit on source (removes items)
-		commitReq := &pb.MigrationCommitRequest{
-			MigrationId: migrationID,
-			ClusterId:   sourceCluster,
-		}
+		// Step 5: Commit on ALL nodes in source cluster (removes items from all replicas)
+		sourceNodes := m.config.GetNodesInCluster(int(sourceCluster))
+		for _, srcNodeID := range sourceNodes {
+			srcClient := m.nodeClients[srcNodeID]
+			if srcClient == nil {
+				continue
+			}
 
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		_, err = sourceClient.MigrationCommit(ctx, commitReq)
-		cancel()
+			// First prepare on this node
+			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			srcClient.MigrationPrepare(ctx, prepareReq)
+			cancel()
 
-		if err != nil {
-			fmt.Printf("  ❌ Commit on source cluster %d failed\n", sourceCluster)
-			failCount += len(moves)
-			continue
+			// Then commit
+			commitReq := &pb.MigrationCommitRequest{
+				MigrationId: migrationID,
+				ClusterId:   sourceCluster,
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+			srcClient.MigrationCommit(ctx, commitReq)
+			cancel()
 		}
 
 		// Print successful moves and update routing
@@ -1701,11 +1737,17 @@ func (m *ClientManager) executeReshard() {
 }
 
 // flushAllNodes implements Flush - reset all node state (supports configurable clusters)
-func (m *ClientManager) flushAllNodes() {
+// If resetAccessTracker is true, also clears the access tracker (resharding data)
+// By default, access tracker persists across flushes to maintain resharding data
+func (m *ClientManager) flushAllNodes(resetAccessTracker bool) {
 	totalNodes := m.config.GetTotalNodes()
 	allNodeIDs := m.config.GetAllNodeIDs()
 
-	fmt.Print("Flushing all nodes...")
+	if resetAccessTracker {
+		fmt.Print("Flushing all nodes (including resharding data)...")
+	} else {
+		fmt.Print("Flushing all nodes (preserving resharding data)...")
+	}
 
 	type flushResult struct {
 		nodeID int32
@@ -1716,7 +1758,7 @@ func (m *ClientManager) flushAllNodes() {
 
 	// Flush all nodes in parallel
 	for _, nodeID := range allNodeIDs {
-		go func(nid int32) {
+		go func(nid int32, resetAT bool) {
 			client, exists := m.nodeClients[nid]
 			if !exists {
 				resultChan <- flushResult{nodeID: nid, err: fmt.Errorf("not connected")}
@@ -1727,9 +1769,10 @@ func (m *ClientManager) flushAllNodes() {
 			defer cancel()
 
 			resp, err := client.FlushState(ctx, &pb.FlushStateRequest{
-				ResetDatabase: true,
-				ResetLogs:     true,
-				ResetBallot:   true,
+				ResetDatabase:      true,
+				ResetLogs:          true,
+				ResetBallot:        true,
+				ResetAccessTracker: resetAT,
 			})
 
 			if err != nil {
@@ -1739,7 +1782,7 @@ func (m *ClientManager) flushAllNodes() {
 			} else {
 				resultChan <- flushResult{nodeID: nid, err: nil}
 			}
-		}(nodeID)
+		}(nodeID, resetAccessTracker)
 	}
 
 	// Collect results
@@ -1764,10 +1807,19 @@ func (m *ClientManager) flushAllNodes() {
 	}
 	m.mu.Unlock()
 
-	// Reset migration tracking (items back to original clusters)
-	m.migratedItemsMu.Lock()
-	m.migratedItems = make(map[int32]int32)
-	m.migratedItemsMu.Unlock()
+	// Only reset migration tracking and transaction history if explicitly requested (flushall)
+	// Otherwise, resharding state persists across test sets
+	if resetAccessTracker {
+		m.migratedItemsMu.Lock()
+		m.migratedItems = make(map[int32]int32)
+		m.migratedItemsMu.Unlock()
+
+		m.txnHistoryMu.Lock()
+		m.txnHistory = nil
+		m.txnHistoryMu.Unlock()
+
+		fmt.Println("Migration tracking and transaction history reset")
+	}
 
 	fmt.Println("Waiting for nodes to stabilize...")
 	time.Sleep(100 * time.Millisecond)

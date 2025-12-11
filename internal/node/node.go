@@ -125,8 +125,10 @@ type Node struct {
 	startTime              time.Time
 
 	// 🔄 Phase 9: Shard Redistribution
-	accessTracker  *redistribution.AccessTracker
-	migrationState *MigrationState
+	accessTracker    *redistribution.AccessTracker
+	migrationState   *MigrationState
+	migratedInItems  map[int32]bool // Items that were migrated INTO this node (persist across flush)
+	migratedOutItems map[int32]bool // Items that were migrated OUT of this node (don't recreate on flush)
 }
 
 // getCheckpointInterval returns checkpoint interval from config or default (100)
@@ -184,6 +186,8 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 		startTime:          time.Now(),                              // Phase 7: Track uptime
 		accessTracker:      redistribution.NewAccessTracker(100000), // Phase 9: Access pattern tracking
 		migrationState:     nil,                                     // Phase 9: Initialized on first migration
+		migratedInItems:    make(map[int32]bool),                    // Phase 9: Items migrated into this node
+		migratedOutItems:   make(map[int32]bool),                    // Phase 9: Items migrated out of this node
 		twoPCState: TwoPCState{
 			transactions: make(map[string]*TwoPCTransaction),
 		},
@@ -237,6 +241,17 @@ func NewNode(id int32, cfg *config.Config) (*Node, error) {
 	if err := n.loadCheckpoint(); err != nil {
 		log.Printf("Node %d: ⚠️ Failed to load checkpoint: %v", id, err)
 	}
+
+	// Load migration state - items stay in their migrated shards until flushall
+	if err := n.loadMigratedInItems(); err != nil {
+		log.Printf("Node %d: 📊 No migrated-in items to load (fresh start)", id)
+	}
+	if err := n.loadMigratedOutItems(); err != nil {
+		log.Printf("Node %d: 📊 No migrated-out items to load (fresh start)", id)
+	}
+	// Access tracker starts fresh each session (only tracks current session's transactions)
+	n.accessTracker = redistribution.NewAccessTracker(100000)
+	log.Printf("Node %d: ✅ Migration state loaded - migrated items persist until flushall", id)
 
 	log.Printf("Node %d (Cluster %d): Timer set to %v (base: 100ms + jitter: %v)",
 		id, clusterID, timerDuration, jitter)
@@ -1051,12 +1066,39 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 	// Reset database to initial state
 	if req.ResetDatabase {
 		cluster := n.config.Clusters[int(n.clusterID)]
+
+		// Save migrated-in items before reset (they should persist)
+		migratedInItems := make(map[int32]int32)
+		if !req.ResetAccessTracker && n.migratedInItems != nil {
+			// Preserve migrated-in items with their current balances
+			for itemID := range n.migratedInItems {
+				if balance, exists := n.balances[itemID]; exists {
+					migratedInItems[itemID] = balance
+				}
+			}
+		}
+
+		// Reset to initial state (but skip migrated-out items)
 		n.balances = make(map[int32]int32)
 		for itemID := cluster.ShardStart; itemID <= cluster.ShardEnd; itemID++ {
+			// Skip items that were migrated OUT (unless doing full reset)
+			if !req.ResetAccessTracker && n.migratedOutItems != nil && n.migratedOutItems[int32(itemID)] {
+				continue // Don't recreate migrated-out items
+			}
 			n.balances[int32(itemID)] = n.config.Data.InitialBalance
 		}
-		log.Printf("Node %d: Database reset to initial state (%d items with balance %d)",
-			n.id, len(n.balances), n.config.Data.InitialBalance)
+
+		// Restore migrated-in items (if not doing full reset)
+		if !req.ResetAccessTracker {
+			for itemID, balance := range migratedInItems {
+				n.balances[itemID] = balance
+			}
+			log.Printf("Node %d: Database reset (preserved %d migrated-in items, excluded %d migrated-out items)",
+				n.id, len(migratedInItems), len(n.migratedOutItems))
+		} else {
+			log.Printf("Node %d: Database fully reset to initial state (%d items with balance %d)",
+				n.id, len(n.balances), n.config.Data.InitialBalance)
+		}
 
 		// Save to disk
 		n.paxosMu.Unlock()
@@ -1098,9 +1140,27 @@ func (n *Node) FlushState(ctx context.Context, req *pb.FlushStateRequest) (*pb.F
 	n.wal = make(map[string]*types.WALEntry)
 	n.walMu.Unlock()
 
-	// Reset access tracker
-	if n.accessTracker != nil {
-		n.accessTracker.Reset()
+	// Reset access tracker and migrated items ONLY if explicitly requested (flushall)
+	// By default (reset_access_tracker=false), resharding data persists across test cases
+	if req.ResetAccessTracker {
+		if n.accessTracker != nil {
+			n.accessTracker.Reset()
+		}
+		// Clear access tracker from persistent storage
+		if err := n.clearAccessTrackerFromDB(); err != nil {
+			log.Printf("Node %d: Warning - failed to clear access tracker from DB: %v", n.id, err)
+		}
+		// Clear migrated-in items tracking
+		if err := n.clearMigratedInItems(); err != nil {
+			log.Printf("Node %d: Warning - failed to clear migratedInItems: %v", n.id, err)
+		}
+		// Clear migrated-out items tracking
+		if err := n.clearMigratedOutItems(); err != nil {
+			log.Printf("Node %d: Warning - failed to clear migratedOutItems: %v", n.id, err)
+		}
+		log.Printf("Node %d: Access tracker and migration tracking reset (resharding data cleared)", n.id)
+	} else {
+		log.Printf("Node %d: Resharding data preserved (access tracker + migration tracking persist)", n.id)
 	}
 
 	// Reset performance counters

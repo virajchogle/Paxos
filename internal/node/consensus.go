@@ -98,11 +98,11 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 
 			if nowLeader {
 				tx := req.Transaction
-				senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-				receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+				senderCluster := n.getClusterForDataItem(tx.Sender)
+				receiverCluster := n.getClusterForDataItem(tx.Receiver)
 
 				// ONLY the sender cluster initiates 2PC!
-				if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {
+				if senderCluster != receiverCluster && n.clusterID == senderCluster {
 					// Cross-shard transaction AND we're the sender cluster - use 2PC
 
 					success, err := n.TwoPCCoordinator(tx, req.ClientId, req.Timestamp)
@@ -152,11 +152,11 @@ func (n *Node) SubmitTransaction(ctx context.Context, req *pb.TransactionRequest
 
 	// leader: check if this is a cross-shard transaction (Phase 6: 2PC)
 	tx := req.Transaction
-	senderCluster := n.config.GetClusterForDataItem(tx.Sender)
-	receiverCluster := n.config.GetClusterForDataItem(tx.Receiver)
+	senderCluster := n.getClusterForDataItem(tx.Sender)
+	receiverCluster := n.getClusterForDataItem(tx.Receiver)
 
 	// only sender cluster intiates 2PC, reciever processes via Paxos
-	if senderCluster != receiverCluster && int(n.clusterID) == senderCluster {
+	if senderCluster != receiverCluster && n.clusterID == senderCluster {
 		// Cross-shard transaction AND we're the sender cluster - use 2PC
 
 		success, err := n.TwoPCCoordinator(tx, req.ClientId, req.Timestamp)
@@ -212,13 +212,19 @@ func (n *Node) QueryBalance(ctx context.Context, req *pb.BalanceQueryRequest) (*
 		}, nil
 	}
 
-	// Check if this node's cluster owns this data item (no lock needed - config is read-only)
-	cluster := int32(n.config.GetClusterForDataItem(dataItemID))
-	if cluster != n.clusterID {
+	// Check if this node owns this data item:
+	// 1. Item is in this cluster's original shard range, OR
+	// 2. Item was migrated INTO this node
+	originalCluster := int32(n.config.GetClusterForDataItem(dataItemID))
+	n.balanceMu.RLock()
+	isMigratedIn := n.migratedInItems != nil && n.migratedInItems[dataItemID]
+	n.balanceMu.RUnlock()
+
+	if originalCluster != n.clusterID && !isMigratedIn {
 		return &pb.BalanceQueryReply{
 			Success:   false,
 			Balance:   0,
-			Message:   fmt.Sprintf("Data item %d not in this cluster (cluster %d owns items in different range)", dataItemID, n.clusterID),
+			Message:   fmt.Sprintf("Data item %d not in this cluster", dataItemID),
 			NodeId:    n.id,
 			ClusterId: n.clusterID,
 		}, nil
@@ -820,14 +826,10 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 	clientID := entry.Request.ClientId
 	timestamp := entry.Request.Timestamp
 
-	// Determine which cluster owns which items
-	senderCluster := n.config.GetClusterForDataItem(sender)
-	receiverCluster := n.config.GetClusterForDataItem(recv)
-	isCrossShard := senderCluster != receiverCluster
-
-	// For cross-shard transactions executed via 2PC, only process the items we own
-	ownsSender := int32(senderCluster) == n.clusterID
-	ownsReceiver := int32(receiverCluster) == n.clusterID
+	// Determine ownership (migration-aware) - this is the definitive check
+	ownsSender := n.ownsDataItem(sender)
+	ownsReceiver := n.ownsDataItem(recv)
+	isCrossShard := ownsSender != ownsReceiver || (!ownsSender && !ownsReceiver)
 
 	if isCrossShard {
 		// Cross-shard transaction - only process our part
@@ -932,7 +934,7 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 	n.writeToWAL(txnID, types.OpTypeCredit, recv, n.balances[recv]-amt, newRecvBalance)
 
 	// Record access pattern
-	n.RecordTransactionAccess(sender, recv, senderCluster != receiverCluster)
+	n.RecordTransactionAccess(sender, recv, isCrossShard)
 
 	// Commit WAL and save balances async
 	n.commitWAL(txnID)
