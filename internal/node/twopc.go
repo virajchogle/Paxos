@@ -577,8 +577,7 @@ func (n *Node) cleanup2PCParticipant(txnID string, commit bool) {
 // ALL NODES HANDLE 2PC PHASES (Not just leader!)
 // ============================================================================
 
-// handle2PCPhase is called by ALL nodes when they accept/commit a 2PC transaction
-// This ensures followers also maintain WAL and can rollback if needed
+// handle2PCPhase handles 2PC phases for all nodes
 func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 	if entry.Request == nil || entry.Request.Transaction == nil {
 		return
@@ -589,7 +588,6 @@ func (n *Node) handle2PCPhase(entry *types.LogEntry, phase string) {
 	clientID := entry.Request.ClientId
 	timestamp := entry.Request.Timestamp
 
-	// Determine which item(s) this node is responsible for (migration-aware)
 	senderCluster := n.getClusterForDataItem(tx.Sender)
 	receiverCluster := n.getClusterForDataItem(tx.Receiver)
 
@@ -810,22 +808,16 @@ func (n *Node) resume2PCTransaction(entry *types.LogEntry) {
 
 	log.Printf("Node %d: 🔄 Resuming 2PC[%s]: %d → %d", n.id, txnID, tx.Sender, tx.Receiver)
 
-	// Get participant cluster info (migration-aware)
 	receiverCluster := n.getClusterForDataItem(tx.Receiver)
 	receiverLeader := n.config.GetLeaderNodeForCluster(int(receiverCluster))
 
-	// Get connection to participant
 	receiverClient, err := n.getCrossClusterClient(int32(receiverLeader))
 	if err != nil {
 		log.Printf("Node %d: 2PC[%s] Recovery: ❌ Cannot connect to participant: %v", n.id, txnID, err)
-		// Can't reach participant - abort locally
 		n.abortRecovered2PC(entry, "participant unreachable")
 		return
 	}
 
-	// Check participant status by sending PREPARE again (idempotent)
-	// If participant already prepared, it will respond with success
-	// If participant doesn't know about it, we need to abort
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

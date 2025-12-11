@@ -826,26 +826,19 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 	clientID := entry.Request.ClientId
 	timestamp := entry.Request.Timestamp
 
-	// Determine ownership (migration-aware) - this is the definitive check
+	// Determine ownership (migration-aware)
 	ownsSender := n.ownsDataItem(sender)
 	ownsReceiver := n.ownsDataItem(recv)
 	isCrossShard := ownsSender != ownsReceiver || (!ownsSender && !ownsReceiver)
 
 	if isCrossShard {
-		// Cross-shard transaction - only process our part
 		if !ownsSender && !ownsReceiver {
-			return pb.ResultType_SUCCESS // Nothing to do for this node
+			return pb.ResultType_SUCCESS
 		}
 
-		// Check if this is a 2PC transaction (Phase == "P" for PREPARE)
-		// For 2PC transactions, locks are managed by TwoPCCoordinator/TwoPCPrepare
-		// and should NOT be released until COMMIT/ABORT phase
 		is2PCTransaction := entry.Phase == "P"
 
-		// For non-2PC cross-shard (shouldn't happen, but handle gracefully)
-		// or if we need to verify lock for 2PC
 		if !is2PCTransaction {
-			// Determine which items to lock
 			var itemsToProcess []int32
 			if ownsSender {
 				itemsToProcess = []int32{sender}
@@ -859,8 +852,6 @@ func (n *Node) executeTransactionSequential(seq int32, entry *types.LogEntry) pb
 			}
 			defer n.releaseLocks(lockedItems, clientID, timestamp)
 		}
-		// For 2PC transactions: locks are already held by 2PC code and will be
-		// released during COMMIT/ABORT phase (via cleanup2PCCoordinator/cleanup2PCParticipant)
 
 		var changedItemID int32
 		var result pb.ResultType

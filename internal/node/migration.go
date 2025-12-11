@@ -40,21 +40,18 @@ func (n *Node) initMigration() {
 
 	if n.accessTracker == nil {
 		n.accessTracker = redistribution.NewAccessTracker(100000)
-		// Try to load persisted access tracker data
 		if err := n.loadAccessTrackerUnlocked(); err != nil {
 			log.Printf("Node %d: No persisted access tracker data (starting fresh)", n.id)
 		}
 	}
 }
 
-// RecordTransactionAccess records a transaction for access pattern analysis
 func (n *Node) RecordTransactionAccess(sender, receiver int32, isCross bool) {
 	if n.accessTracker == nil {
 		return
 	}
 	n.accessTracker.RecordTransaction(sender, receiver, isCross)
 
-	// Persist access tracker periodically (every 100 transactions) to avoid excessive writes
 	if n.accessTracker.GetTransactionCount()%100 == 0 {
 		go func() {
 			if err := n.saveAccessTracker(); err != nil {
@@ -117,13 +114,9 @@ func (n *Node) MigrationPrepare(ctx context.Context, req *pb.MigrationPrepareReq
 	}, nil
 }
 
-// MigrationGetData retrieves data for items being migrated
-// SIMPLIFIED: Just retrieves data without requiring prepare state
 func (n *Node) MigrationGetData(ctx context.Context, req *pb.MigrationGetDataRequest) (*pb.MigrationGetDataReply, error) {
-	log.Printf("Node %d: 📤 MigrationGetData - migration %s, %d items",
-		n.id, req.MigrationId, len(req.ItemIds))
+	log.Printf("Node %d: 📤 MigrationGetData - migration %s, %d items", n.id, req.MigrationId, len(req.ItemIds))
 
-	// Get item data directly
 	items := make([]*pb.MigrationDataItem, 0, len(req.ItemIds))
 	n.balanceMu.RLock()
 	for _, itemID := range req.ItemIds {
@@ -146,15 +139,12 @@ func (n *Node) MigrationGetData(ctx context.Context, req *pb.MigrationGetDataReq
 	}, nil
 }
 
-// MigrationSetData stores data items from a migration
-// SIMPLIFIED: Directly adds items to balances and tracks as migrated
 func (n *Node) MigrationSetData(ctx context.Context, req *pb.MigrationSetDataRequest) (*pb.MigrationSetDataReply, error) {
 	log.Printf("Node %d: 📥 MigrationSetData - migration %s, %d items from cluster %d",
 		n.id, req.MigrationId, len(req.Items), req.SourceCluster)
 
 	n.initMigration()
 
-	// Directly add items to balances and track as migrated
 	n.balanceMu.Lock()
 	if n.migratedInItems == nil {
 		n.migratedInItems = make(map[int32]bool)
@@ -166,12 +156,10 @@ func (n *Node) MigrationSetData(ctx context.Context, req *pb.MigrationSetDataReq
 	}
 	n.balanceMu.Unlock()
 
-	// Persist to database
 	if err := n.saveDatabase(); err != nil {
 		log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
 	}
 
-	// Persist migrated items tracking
 	if err := n.saveMigratedInItems(); err != nil {
 		log.Printf("Node %d: Warning - failed to save migratedInItems: %v", n.id, err)
 	}
@@ -185,7 +173,6 @@ func (n *Node) MigrationSetData(ctx context.Context, req *pb.MigrationSetDataReq
 	}, nil
 }
 
-// MigrationCommit finalizes a migration
 func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitRequest) (*pb.MigrationCommitReply, error) {
 	log.Printf("Node %d: ✅ MigrationCommit - migration %s", n.id, req.MigrationId)
 
@@ -206,53 +193,46 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 	n.migrationState.mu.Unlock()
 
 	if role == "source" {
-		// Source: Remove items from local database AND track as migrated out
 		n.balanceMu.Lock()
 		if n.migratedOutItems == nil {
 			n.migratedOutItems = make(map[int32]bool)
 		}
 		for _, itemID := range migration.Items {
 			delete(n.balances, itemID)
-			n.migratedOutItems[itemID] = true // Track as migrated out
+			n.migratedOutItems[itemID] = true
 			log.Printf("Node %d: Removed item %d (migrated out)", n.id, itemID)
 		}
 		n.balanceMu.Unlock()
 
-		// Save database
 		if err := n.saveDatabase(); err != nil {
 			log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
 		}
 
-		// Save migrated out items tracking
 		if err := n.saveMigratedOutItems(); err != nil {
 			log.Printf("Node %d: Warning - failed to save migratedOutItems: %v", n.id, err)
 		}
 
 	} else if role == "target" {
-		// Target: Move received items to main database AND track as migrated
 		n.balanceMu.Lock()
 		if n.migratedInItems == nil {
 			n.migratedInItems = make(map[int32]bool)
 		}
 		for itemID, balance := range migration.ReceivedItems {
 			n.balances[itemID] = balance
-			n.migratedInItems[itemID] = true // Track as migrated in
+			n.migratedInItems[itemID] = true
 			log.Printf("Node %d: Added item %d with balance %d (migrated in)", n.id, itemID, balance)
 		}
 		n.balanceMu.Unlock()
 
-		// Save database
 		if err := n.saveDatabase(); err != nil {
 			log.Printf("Node %d: Warning - failed to save database: %v", n.id, err)
 		}
 
-		// Save migrated items tracking
 		if err := n.saveMigratedInItems(); err != nil {
 			log.Printf("Node %d: Warning - failed to save migratedInItems: %v", n.id, err)
 		}
 	}
 
-	// Cleanup
 	n.migrationState.mu.Lock()
 	for _, itemID := range migration.Items {
 		delete(n.migrationState.pendingItems, itemID)
@@ -269,7 +249,6 @@ func (n *Node) MigrationCommit(ctx context.Context, req *pb.MigrationCommitReque
 	}, nil
 }
 
-// MigrationRollback rolls back a migration
 func (n *Node) MigrationRollback(ctx context.Context, req *pb.MigrationRollbackRequest) (*pb.MigrationRollbackReply, error) {
 	log.Printf("Node %d: ⚠️  MigrationRollback - migration %s", n.id, req.MigrationId)
 
@@ -287,12 +266,10 @@ func (n *Node) MigrationRollback(ctx context.Context, req *pb.MigrationRollbackR
 		}, nil
 	}
 
-	// Release locks on items
 	for _, itemID := range migration.Items {
 		delete(n.migrationState.pendingItems, itemID)
 	}
 
-	// If we're the target and received items, discard them (they weren't committed)
 	if migration.Role == "target" {
 		migration.ReceivedItems = make(map[int32]int32)
 	}
@@ -308,7 +285,6 @@ func (n *Node) MigrationRollback(ctx context.Context, req *pb.MigrationRollbackR
 	}, nil
 }
 
-// GetAccessStats returns access pattern statistics
 func (n *Node) GetAccessStats(ctx context.Context, req *pb.GetAccessStatsRequest) (*pb.GetAccessStatsReply, error) {
 	log.Printf("Node %d: 📊 GetAccessStats", n.id)
 
@@ -324,7 +300,6 @@ func (n *Node) GetAccessStats(ctx context.Context, req *pb.GetAccessStatsRequest
 	stats := n.accessTracker.GetStats()
 	topPairs := n.accessTracker.GetTopCoAccessPairs(20)
 
-	// Convert to protobuf
 	coAccessPairs := make([]*pb.CoAccessPair, len(topPairs))
 	for i, pair := range topPairs {
 		coAccessPairs[i] = &pb.CoAccessPair{
@@ -350,13 +325,11 @@ func (n *Node) GetAccessStats(ctx context.Context, req *pb.GetAccessStatsRequest
 	}, nil
 }
 
-// TriggerRebalance initiates shard rebalancing
 func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceRequest) (*pb.TriggerRebalanceReply, error) {
 	log.Printf("Node %d: 🔄 TriggerRebalance (dry_run=%v)", n.id, req.DryRun)
 
 	n.initMigration()
 
-	// Only leader can trigger rebalance
 	n.balanceMu.RLock()
 	isLeader := n.isLeader
 	n.balanceMu.RUnlock()
@@ -375,25 +348,20 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 		}, nil
 	}
 
-	// Build SIMPLE GRAPH from access patterns
 	numClusters := int32(len(n.config.Clusters))
-
 	graph := redistribution.NewSimpleGraph(numClusters, 0)
 
-	// Add vertices for all items in local shard (migration-aware)
 	itemAccess := n.accessTracker.GetItemAccessMap()
 	for itemID, count := range itemAccess {
 		currentCluster := n.getClusterForDataItem(itemID)
 		graph.AddVertex(itemID, count, currentCluster)
 	}
 
-	// Add edges from co-access patterns (simple graph: each edge is between 2 items)
 	coAccess := n.accessTracker.GetCoAccessMatrix()
 	for pair, count := range coAccess {
 		graph.AddEdge(pair.First, pair.Second, count)
 	}
 
-	// Configure simple partitioner
 	config := redistribution.DefaultSimplePartitionConfig()
 	if req.MinGain > 0 {
 		config.MinGain = int64(req.MinGain)
@@ -403,7 +371,6 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 	}
 	config.Verbose = true
 
-	// Run SIMPLE GRAPH partitioning
 	partitioner := redistribution.NewSimplePartitioner(graph, config)
 	result, err := partitioner.Partition()
 	if err != nil {
@@ -413,7 +380,6 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 		}, nil
 	}
 
-	// Convert moves to protobuf
 	moves := make([]*pb.MigrationMove, len(result.Moves))
 	for i, move := range result.Moves {
 		moves[i] = &pb.MigrationMove{
@@ -438,8 +404,6 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 			len(result.Moves), result.CutReduction*100)
 		log.Printf("Node %d: Rebalance dry run complete: %s", n.id, reply.Message)
 	} else {
-		// TODO: Execute actual migration
-		// For now, just return the plan
 		reply.MigrationId = fmt.Sprintf("rebal_%d", time.Now().UnixNano())
 		reply.Message = fmt.Sprintf("Rebalance planned: %d items to move, migration_id=%s",
 			len(result.Moves), reply.MigrationId)
@@ -449,14 +413,11 @@ func (n *Node) TriggerRebalance(ctx context.Context, req *pb.TriggerRebalanceReq
 	return reply, nil
 }
 
-// PrintReshard triggers resharding using SIMPLE GRAPH PARTITIONING
-// and outputs triplets (item_id, from_cluster, to_cluster)
 func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*pb.PrintReshardReply, error) {
 	log.Printf("Node %d: 📝 PrintReshard requested (execute=%v)", n.id, req.Execute)
 
 	n.initMigration()
 
-	// Only leader can trigger reshard
 	n.balanceMu.RLock()
 	isLeader := n.isLeader
 	n.balanceMu.RUnlock()
@@ -475,33 +436,27 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 		}, nil
 	}
 
-	// Build SIMPLE GRAPH from access patterns
 	numClusters := int32(len(n.config.Clusters))
 	totalItems := int32(n.config.Data.TotalItems)
-
 	graph := redistribution.NewSimpleGraph(numClusters, totalItems)
 
-	// Add vertices for all items (migration-aware)
 	itemAccess := n.accessTracker.GetItemAccessMap()
 	for itemID, count := range itemAccess {
 		currentCluster := n.getClusterForDataItem(itemID)
 		graph.AddVertex(itemID, count, currentCluster)
 	}
 
-	// Add edges from co-access patterns (simple graph: each edge is between 2 items)
 	coAccess := n.accessTracker.GetCoAccessMatrix()
 	for pair, count := range coAccess {
 		graph.AddEdge(pair.First, pair.Second, count)
 	}
 
-	// Configure simple partitioner
 	config := redistribution.DefaultSimplePartitionConfig()
 	if req.MinGain > 0 {
 		config.MinGain = int64(req.MinGain)
 	}
 	config.Verbose = true
 
-	// Run SIMPLE GRAPH partitioning
 	partitioner := redistribution.NewSimplePartitioner(graph, config)
 	result, err := partitioner.Partition()
 	if err != nil {
@@ -511,7 +466,6 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 		}, nil
 	}
 
-	// Convert moves to triplets
 	triplets := make([]*pb.ReshardTriplet, len(result.Moves))
 	for i, move := range result.Moves {
 		triplets[i] = &pb.ReshardTriplet{
@@ -521,7 +475,6 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 		}
 	}
 
-	// Output triplets to log
 	log.Printf("========== RESHARD RESULTS (Node %d) ==========", n.id)
 	log.Printf("Using: SIMPLE GRAPH PARTITIONING")
 	log.Printf("Initial edge cut: %d (cross-shard transactions)", result.InitialCut)
@@ -539,7 +492,6 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 		len(triplets), result.CutReduction*100)
 
 	if req.Execute {
-		// TODO: Execute actual migration
 		message += " (execution not yet implemented)"
 	}
 
@@ -550,13 +502,9 @@ func (n *Node) PrintReshard(ctx context.Context, req *pb.PrintReshardRequest) (*
 	}, nil
 }
 
-// ============================================================================
-// ACCESS TRACKER PERSISTENCE
-// ============================================================================
-
+// Access tracker persistence
 const accessTrackerKey = "access_tracker_state"
 
-// saveAccessTracker persists the access tracker state to PebbleDB
 func (n *Node) saveAccessTracker() error {
 	if n.accessTracker == nil || n.pebbleDB == nil {
 		return nil
@@ -567,7 +515,6 @@ func (n *Node) saveAccessTracker() error {
 		return fmt.Errorf("failed to serialize access tracker: %w", err)
 	}
 
-	// Write to PebbleDB
 	key := []byte(accessTrackerKey)
 	if err := n.pebbleDB.Set(key, data, nil); err != nil {
 		return fmt.Errorf("failed to save access tracker to PebbleDB: %w", err)
@@ -578,14 +525,12 @@ func (n *Node) saveAccessTracker() error {
 	return nil
 }
 
-// loadAccessTracker loads the access tracker state from PebbleDB
 func (n *Node) loadAccessTracker() error {
 	n.balanceMu.Lock()
 	defer n.balanceMu.Unlock()
 	return n.loadAccessTrackerUnlocked()
 }
 
-// loadAccessTrackerUnlocked loads access tracker without acquiring balanceMu (caller must hold lock)
 func (n *Node) loadAccessTrackerUnlocked() error {
 	if n.pebbleDB == nil {
 		return fmt.Errorf("PebbleDB not initialized")
@@ -598,7 +543,6 @@ func (n *Node) loadAccessTrackerUnlocked() error {
 	}
 	defer closer.Close()
 
-	// Make a copy since data is only valid until closer.Close()
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
 
@@ -615,7 +559,6 @@ func (n *Node) loadAccessTrackerUnlocked() error {
 	return nil
 }
 
-// clearAccessTrackerFromDB removes the access tracker state from PebbleDB
 func (n *Node) clearAccessTrackerFromDB() error {
 	if n.pebbleDB == nil {
 		return nil
@@ -623,7 +566,6 @@ func (n *Node) clearAccessTrackerFromDB() error {
 
 	key := []byte(accessTrackerKey)
 	if err := n.pebbleDB.Delete(key, nil); err != nil {
-		// Ignore "not found" errors
 		return nil
 	}
 
@@ -631,13 +573,9 @@ func (n *Node) clearAccessTrackerFromDB() error {
 	return nil
 }
 
-// ============================================================================
-// MIGRATED ITEMS PERSISTENCE
-// ============================================================================
-
+// Migrated items persistence
 const migratedInItemsKey = "migrated_in_items"
 
-// saveMigratedInItems persists the migratedInItems map to PebbleDB
 func (n *Node) saveMigratedInItems() error {
 	if n.pebbleDB == nil {
 		return nil
@@ -650,7 +588,6 @@ func (n *Node) saveMigratedInItems() error {
 	}
 	n.balanceMu.RUnlock()
 
-	// Serialize as comma-separated values
 	var data string
 	for i, itemID := range items {
 		if i > 0 {
@@ -668,7 +605,6 @@ func (n *Node) saveMigratedInItems() error {
 	return nil
 }
 
-// loadMigratedInItems loads the migratedInItems map from PebbleDB
 func (n *Node) loadMigratedInItems() error {
 	if n.pebbleDB == nil {
 		return fmt.Errorf("PebbleDB not initialized")
@@ -677,7 +613,7 @@ func (n *Node) loadMigratedInItems() error {
 	key := []byte(migratedInItemsKey)
 	data, closer, err := n.pebbleDB.Get(key)
 	if err != nil {
-		return err // Not found is fine
+		return err
 	}
 	defer closer.Close()
 
@@ -688,7 +624,6 @@ func (n *Node) loadMigratedInItems() error {
 		n.migratedInItems = make(map[int32]bool)
 	}
 
-	// Parse comma-separated values
 	dataStr := string(data)
 	if dataStr == "" {
 		return nil
@@ -705,7 +640,6 @@ func (n *Node) loadMigratedInItems() error {
 	return nil
 }
 
-// splitCSV splits a comma-separated string
 func splitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -721,7 +655,6 @@ func splitCSV(s string) []string {
 	return result
 }
 
-// clearMigratedInItems clears the migratedInItems from memory and PebbleDB
 func (n *Node) clearMigratedInItems() error {
 	n.balanceMu.Lock()
 	n.migratedInItems = make(map[int32]bool)
@@ -733,7 +666,6 @@ func (n *Node) clearMigratedInItems() error {
 
 	key := []byte(migratedInItemsKey)
 	if err := n.pebbleDB.Delete(key, nil); err != nil {
-		// Ignore "not found" errors
 		return nil
 	}
 
@@ -741,13 +673,9 @@ func (n *Node) clearMigratedInItems() error {
 	return nil
 }
 
-// ============================================================================
-// MIGRATED OUT ITEMS PERSISTENCE
-// ============================================================================
-
+// Migrated out items persistence
 const migratedOutItemsKey = "migrated_out_items"
 
-// saveMigratedOutItems persists the migratedOutItems map to PebbleDB
 func (n *Node) saveMigratedOutItems() error {
 	if n.pebbleDB == nil {
 		return nil
@@ -760,7 +688,6 @@ func (n *Node) saveMigratedOutItems() error {
 	}
 	n.balanceMu.RUnlock()
 
-	// Serialize as comma-separated values
 	var data string
 	for i, itemID := range items {
 		if i > 0 {
@@ -778,7 +705,6 @@ func (n *Node) saveMigratedOutItems() error {
 	return nil
 }
 
-// loadMigratedOutItems loads the migratedOutItems map from PebbleDB
 func (n *Node) loadMigratedOutItems() error {
 	if n.pebbleDB == nil {
 		return fmt.Errorf("PebbleDB not initialized")
@@ -787,7 +713,7 @@ func (n *Node) loadMigratedOutItems() error {
 	key := []byte(migratedOutItemsKey)
 	data, closer, err := n.pebbleDB.Get(key)
 	if err != nil {
-		return err // Not found is fine
+		return err
 	}
 	defer closer.Close()
 
@@ -798,7 +724,6 @@ func (n *Node) loadMigratedOutItems() error {
 		n.migratedOutItems = make(map[int32]bool)
 	}
 
-	// Parse comma-separated values
 	dataStr := string(data)
 	if dataStr == "" {
 		return nil
@@ -815,7 +740,6 @@ func (n *Node) loadMigratedOutItems() error {
 	return nil
 }
 
-// clearMigratedOutItems clears the migratedOutItems from memory and PebbleDB
 func (n *Node) clearMigratedOutItems() error {
 	n.balanceMu.Lock()
 	n.migratedOutItems = make(map[int32]bool)
@@ -827,7 +751,6 @@ func (n *Node) clearMigratedOutItems() error {
 
 	key := []byte(migratedOutItemsKey)
 	if err := n.pebbleDB.Delete(key, nil); err != nil {
-		// Ignore "not found" errors
 		return nil
 	}
 

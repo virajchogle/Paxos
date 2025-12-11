@@ -331,8 +331,6 @@ func (m *ClientManager) processNextSet() {
 	m.txnHistoryMu.Unlock()
 	m.resetClientMetrics()
 
-	// Always flush to ensure clean state (including test set 1)
-	// Note: migratedItems persist across test sets (until flushall)
 	m.flushAllNodes(false)
 	time.Sleep(100 * time.Millisecond)
 
@@ -618,16 +616,12 @@ func (m *ClientManager) getClusterForDataItem(dataItemID int32) int32 {
 }
 
 // getTargetNodeForTransaction determines which node should handle a transaction
-// For intra-shard: returns leader of that shard's cluster
-// For cross-shard: returns leader of sender's cluster (will be 2PC coordinator)
 func (m *ClientManager) getTargetNodeForTransaction(sender, receiver int32) (int32, bool) {
 	senderCluster := m.getClusterForDataItem(sender)
 	receiverCluster := m.getClusterForDataItem(receiver)
 
 	isCrossShard := senderCluster != receiverCluster
 
-	// For both intra-shard and cross-shard, send to sender's cluster leader
-	// (sender's cluster will be the 2PC coordinator for cross-shard)
 	m.mu.Lock()
 	targetNode, exists := m.clusterLeaders[senderCluster]
 	m.mu.Unlock()
@@ -1353,8 +1347,7 @@ func (m *ClientManager) printViewAllNodes() {
 	fmt.Println()
 }
 
-// printReshard implements PrintReshard using CLIENT-SIDE SIMPLE GRAPH PARTITIONING
-// This is a centralized approach where the client analyzes transaction history
+// printReshard implements PrintReshard using simple graph partitioning
 func (m *ClientManager) printReshard() {
 	fmt.Printf("\n╔════════════════════════════════════════════════════════════════════╗\n")
 	fmt.Printf("║  PrintReshard - Client-Side Simple Graph Partitioning            ║\n")
@@ -1472,7 +1465,6 @@ func (m *ClientManager) printReshard() {
 }
 
 // executeReshard performs actual data migration based on resharding analysis
-// This implements the "(2) effectively carry out the resharding process" from the spec
 func (m *ClientManager) executeReshard() {
 	fmt.Println("\nExecuting Resharding (Data Migration)...")
 	fmt.Println("─────────────────────────────────────────────────")
@@ -1634,8 +1626,7 @@ func (m *ClientManager) executeReshard() {
 			itemsByTarget[targetCluster] = append(itemsByTarget[targetCluster], item)
 		}
 
-		// Step 3: Send data to ALL nodes in each target cluster (not just leader)
-		// This ensures the migrated data is replicated across all nodes
+		// Step 3: Send data to all nodes in target cluster
 		allTargetsOK := true
 		for targetCluster, items := range itemsByTarget {
 			targetNodes := m.config.GetNodesInCluster(int(targetCluster))
@@ -1736,9 +1727,7 @@ func (m *ClientManager) executeReshard() {
 	}
 }
 
-// flushAllNodes implements Flush - reset all node state (supports configurable clusters)
-// If resetAccessTracker is true, also clears the access tracker (resharding data)
-// By default, access tracker persists across flushes to maintain resharding data
+// flushAllNodes resets all node state
 func (m *ClientManager) flushAllNodes(resetAccessTracker bool) {
 	totalNodes := m.config.GetTotalNodes()
 	allNodeIDs := m.config.GetAllNodeIDs()
@@ -1807,8 +1796,6 @@ func (m *ClientManager) flushAllNodes(resetAccessTracker bool) {
 	}
 	m.mu.Unlock()
 
-	// Only reset migration tracking and transaction history if explicitly requested (flushall)
-	// Otherwise, resharding state persists across test sets
 	if resetAccessTracker {
 		m.migratedItemsMu.Lock()
 		m.migratedItems = make(map[int32]int32)
